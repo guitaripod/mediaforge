@@ -1,0 +1,13 @@
+services:
+  mediaforge:
+    build: .
+    ports:
+      - "8484:8484"
+    volumes:
+      - ./config:/config
+      - ./cache:/cache
+      - /path/to/Movies:/media/movies:ro
+      - /path/to/TV Shows:/media/tv:ro
+    environment:
+      - RUST_LOG=info
+    restart: unless-stopped

@@ -8,9 +8,13 @@ Personal media server built in Rust. Scans your library, fetches metadata from T
 - **HLS streaming** with on-the-fly transcoding for incompatible codecs
 - **Direct file streaming** with HTTP Range request support
 - **TMDB metadata** integration (movie/show/episode lookup, poster proxying)
-- **Playback tracking** (resume position, watched state)
+- **Multi-audio track selection** with per-track language, codec, and channel info
+- **Playback tracking** (resume position, watched state, activity history)
+- **Watch history** with activity logging (play/pause/complete events)
+- **WebSocket** real-time scan progress (no polling needed)
 - **Subtitle support** (embedded extraction to WebVTT, external SRT/VTT serving)
 - **Smart codec detection** — copies compatible streams, only transcodes when necessary
+- **Docker support** with multi-stage build
 
 <details>
 <summary><strong>Supported Formats</strong></summary>
@@ -97,6 +101,25 @@ systemctl --user restart mediaforge    # after a rebuild
 journalctl --user -u mediaforge -f     # tail logs
 ```
 
+### Docker
+
+```sh
+docker build -t mediaforge .
+docker run -d \
+  -p 8484:8484 \
+  -v /path/to/config:/config \
+  -v /path/to/cache:/cache \
+  -v /path/to/Movies:/media/movies:ro \
+  -v "/path/to/TV Shows:/media/tv:ro" \
+  mediaforge
+```
+
+Or with docker compose:
+```sh
+# Edit docker-compose.yml with your media paths
+docker compose up -d
+```
+
 ### Remote access (Tailscale)
 
 MediaForge is designed to run on your home server and be accessed remotely via [Tailscale](https://tailscale.com). Tailscale creates an encrypted mesh VPN between your devices — no port forwarding, no public exposure, no authentication layer needed.
@@ -138,16 +161,17 @@ tailscale ip -4
 | Method | Endpoint | Description |
 |--------|----------|-------------|
 | GET | `/api/playback/:id/state` | Get playback position |
-| PUT | `/api/playback/:id/state` | Update position (`{ "position_secs": 120.5 }`) |
+| PUT | `/api/playback/:id/state` | Update position (`{ "position_secs": 120.5, "event": "play" }`) |
 | POST | `/api/playback/:id/watched` | Mark as watched |
 | DELETE | `/api/playback/:id/watched` | Mark as unwatched |
+| GET | `/api/playback/history` | Activity log (`?media_id=&limit=50&offset=0`) |
 
 ### Streaming
 
 | Method | Endpoint | Description |
 |--------|----------|-------------|
 | GET | `/api/stream/:id/info` | Stream info (codec, resolution, transcode needed?) |
-| POST | `/api/stream/:id/hls/prepare` | Start HLS generation |
+| POST | `/api/stream/:id/hls/prepare` | Start HLS generation (`{ "audio_track_id": "..." }`) |
 | GET | `/api/stream/:id/hls/status` | Check HLS readiness |
 | GET | `/api/stream/:id/hls/playlist.m3u8` | HLS master playlist |
 | GET | `/api/stream/:id/hls/:segment` | HLS segment |
@@ -170,6 +194,7 @@ tailscale ip -4
 | GET | `/api/system/stats` | Library statistics |
 | GET | `/api/system/config` | Current config (API key redacted) |
 | GET | `/api/system/scan-status` | Scan/metadata fetch progress (idle, scanning, fetching_metadata) |
+| WS | `/api/system/ws` | WebSocket for real-time scan progress |
 
 </details>
 
@@ -182,11 +207,12 @@ Client (any HTTP client)
         | HTTP (JSON + HLS)
         v
 MediaForge (Rust/Axum)
-  ├── REST API (Axum)
+  ├── REST API + WebSocket (Axum)
   ├── Media Scanner (walkdir + ffprobe)
   ├── TMDB Metadata Client
   ├── HLS Session Manager (DashMap + Semaphore)
   ├── FFmpeg Wrapper (probe, HLS, remux, subtitles)
+  ├── Activity Logger (play/pause/complete tracking)
   └── SQLite Database (WAL mode, r2d2 pool)
 ```
 
