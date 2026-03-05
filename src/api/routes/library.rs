@@ -347,12 +347,26 @@ struct ContinueWatchingItem {
     episode_title: Option<String>,
 }
 
+#[derive(Serialize)]
+struct ContinueWatchingResponse {
+    items: Vec<ContinueWatchingItem>,
+    total: i64,
+}
+
 async fn continue_watching(
     State(state): State<Arc<AppState>>,
     Query(params): Query<PaginationParams>,
-) -> AppResult<Json<Vec<ContinueWatchingItem>>> {
+) -> AppResult<Json<ContinueWatchingResponse>> {
     let limit = params.per_page.unwrap_or(20).min(100);
     let conn = state.db.conn();
+
+    let total: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM playback_state p
+         JOIN media_items m ON m.id = p.media_id
+         WHERE p.is_watched = 0 AND p.position_secs > 0",
+        [],
+        |row| row.get(0),
+    )?;
 
     let mut stmt = conn.prepare(
         "SELECT m.id, m.title, m.media_type, m.poster_path, m.duration_secs,
@@ -384,7 +398,7 @@ async fn continue_watching(
         .filter_map(|r| r.ok())
         .collect();
 
-    Ok(Json(items))
+    Ok(Json(ContinueWatchingResponse { items, total }))
 }
 
 async fn recent_items(
