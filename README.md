@@ -97,6 +97,19 @@ systemctl --user restart mediaforge    # after a rebuild
 journalctl --user -u mediaforge -f     # tail logs
 ```
 
+### Remote access (Tailscale)
+
+MediaForge is designed to run on your home server and be accessed remotely via [Tailscale](https://tailscale.com). Tailscale creates an encrypted mesh VPN between your devices — no port forwarding, no public exposure, no authentication layer needed.
+
+1. Install Tailscale on your server and client devices
+2. MediaForge binds to `0.0.0.0:8484` by default, so it's reachable on your Tailscale IP
+3. Access from any device on your tailnet: `http://100.x.y.z:8484`
+
+Find your server's Tailscale IP with:
+```sh
+tailscale ip -4
+```
+
 <details>
 <summary><strong>API Reference</strong></summary>
 
@@ -109,6 +122,9 @@ journalctl --user -u mediaforge -f     # tail logs
 | GET | `/api/library/shows` | List TV shows |
 | GET | `/api/library/shows/:id` | Show detail with season list |
 | GET | `/api/library/shows/:id/seasons/:num` | Episodes in a season |
+| GET | `/api/library/shows/:id/next` | Next unwatched episode for a show |
+| GET | `/api/library/episodes/:id` | Episode detail with subtitles and playback state |
+| GET | `/api/library/continue` | In-progress items (resume watching) |
 | GET | `/api/library/recent` | Recently added items |
 | GET | `/api/library/search?q=` | Search across all media |
 
@@ -153,6 +169,7 @@ journalctl --user -u mediaforge -f     # tail logs
 | GET | `/api/system/health` | Health check |
 | GET | `/api/system/stats` | Library statistics |
 | GET | `/api/system/config` | Current config (API key redacted) |
+| GET | `/api/system/scan-status` | Scan/metadata fetch progress (idle, scanning, fetching_metadata) |
 
 </details>
 
