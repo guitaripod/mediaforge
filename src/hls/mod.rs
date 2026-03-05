@@ -3,9 +3,10 @@ use dashmap::DashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tokio::sync::Semaphore;
+use tokio_util::sync::CancellationToken;
 use tracing::{debug, info};
 
-use crate::ffmpeg::{AdaptiveHlsParams, FFmpeg, ProgressCallback};
+use crate::ffmpeg::{AdaptiveHlsParams, FFmpeg, ProgressCallback, RemuxHlsParams};
 
 pub struct PrepareStreamParams<'a> {
     pub media_id: &'a str,
@@ -15,9 +16,9 @@ pub struct PrepareStreamParams<'a> {
     pub audio_stream_index: Option<i32>,
     pub source_height: Option<i32>,
     pub duration_secs: Option<f64>,
+    pub start_secs: Option<f64>,
 }
 
-/// Manages HLS session creation, caching, and cleanup
 #[derive(Clone)]
 pub struct HlsManager {
     ffmpeg: FFmpeg,
@@ -25,6 +26,7 @@ pub struct HlsManager {
     segment_duration: u32,
     sessions: Arc<DashMap<String, HlsSession>>,
     active: Arc<DashMap<String, String>>,
+    cancels: Arc<DashMap<String, CancellationToken>>,
     transcode_semaphore: Arc<Semaphore>,
 }
 
@@ -58,6 +60,7 @@ impl HlsManager {
             segment_duration,
             sessions: Arc::new(DashMap::new()),
             active: Arc::new(DashMap::new()),
+            cancels: Arc::new(DashMap::new()),
             transcode_semaphore: Arc::new(Semaphore::new(max_concurrent)),
         }
     }
@@ -65,34 +68,47 @@ impl HlsManager {
     pub async fn prepare_stream(&self, params: PrepareStreamParams<'_>) -> Result<HlsSession> {
         let PrepareStreamParams {
             media_id, file_path, video_codec, audio_codec,
-            audio_stream_index, source_height, duration_secs,
+            audio_stream_index, source_height, duration_secs, start_secs,
         } = params;
         let session_key = match audio_stream_index {
             Some(idx) => format!("{}_a{}", media_id, idx),
             None => media_id.to_string(),
         };
 
+        if let Some(prev_key) = self.active.get(media_id)
+            && *prev_key.value() != session_key
+        {
+            self.cancel_session(prev_key.value());
+        }
+
         self.active.insert(media_id.to_string(), session_key.clone());
 
-        if let Some(session) = self.sessions.get(&session_key)
-            && session.status == HlsStatus::Ready
-        {
-            return Ok(session.clone());
+        if start_secs.is_none() {
+            if let Some(session) = self.sessions.get(&session_key)
+                && session.status == HlsStatus::Ready
+            {
+                return Ok(session.clone());
+            }
+
+            let output_dir = self.cache_dir.join("hls").join(&session_key);
+            let master_path = output_dir.join("master.m3u8");
+            if master_path.exists() {
+                let session = HlsSession {
+                    media_id: media_id.to_string(),
+                    output_dir: output_dir.clone(),
+                    needs_transcode: false,
+                    status: HlsStatus::Ready,
+                };
+                self.sessions.insert(session_key, session.clone());
+                return Ok(session);
+            }
         }
 
         let output_dir = self.cache_dir.join("hls").join(&session_key);
-        let master_path = output_dir.join("master.m3u8");
-
-        if master_path.exists() {
-            let session = HlsSession {
-                media_id: media_id.to_string(),
-                output_dir: output_dir.clone(),
-                needs_transcode: false,
-                status: HlsStatus::Ready,
-            };
-            self.sessions
-                .insert(session_key, session.clone());
-            return Ok(session);
+        if start_secs.is_some() && output_dir.exists() {
+            self.cancel_session(&session_key);
+            std::fs::remove_dir_all(&output_dir).ok();
+            self.sessions.remove(&session_key);
         }
 
         let needs_video_transcode = video_codec
@@ -115,8 +131,8 @@ impl HlsManager {
             .insert(session_key.clone(), session.clone());
 
         info!(
-            "Preparing HLS stream for {} (audio={:?}): video_transcode={}, audio_transcode={}",
-            media_id, audio_stream_index, needs_video_transcode, needs_audio_transcode
+            "Preparing HLS stream for {} (audio={:?}, start={:?}): video_transcode={}, audio_transcode={}",
+            media_id, audio_stream_index, start_secs, needs_video_transcode, needs_audio_transcode
         );
 
         let _permit = self.transcode_semaphore.acquire().await?;
@@ -132,6 +148,9 @@ impl HlsManager {
             }
         });
 
+        let cancel = CancellationToken::new();
+        self.cancels.insert(session_key.clone(), cancel.clone());
+
         let result = if needs_video_transcode {
             self.ffmpeg
                 .generate_hls_adaptive(AdaptiveHlsParams {
@@ -141,14 +160,26 @@ impl HlsManager {
                     source_height: source_height.unwrap_or(1080),
                     audio_stream_index,
                     duration_secs,
+                    start_secs,
                     on_progress,
+                    cancel: cancel.clone(),
                 })
                 .await
         } else {
             self.ffmpeg
-                .generate_hls(input_path, &output_dir, self.segment_duration, None, needs_audio_transcode, audio_stream_index)
+                .generate_hls(RemuxHlsParams {
+                    input_path: input_path.to_path_buf(),
+                    output_dir: output_dir.clone(),
+                    segment_duration: self.segment_duration,
+                    start_secs,
+                    transcode_audio: needs_audio_transcode,
+                    audio_stream_index,
+                    cancel: cancel.clone(),
+                })
                 .await
         };
+
+        self.cancels.remove(&session_key);
 
         match result {
             Ok(()) => {
@@ -165,16 +196,33 @@ impl HlsManager {
             }
             Err(e) => {
                 let err_msg = e.to_string();
-                let session = HlsSession {
-                    media_id: media_id.to_string(),
-                    output_dir,
-                    needs_transcode,
-                    status: HlsStatus::Error(err_msg.clone()),
-                };
-                self.sessions
-                    .insert(session_key, session.clone());
+                if err_msg.contains("cancelled") {
+                    info!("HLS transcode cancelled for {}", media_id);
+                } else {
+                    let session = HlsSession {
+                        media_id: media_id.to_string(),
+                        output_dir,
+                        needs_transcode,
+                        status: HlsStatus::Error(err_msg.clone()),
+                    };
+                    self.sessions
+                        .insert(session_key, session.clone());
+                }
                 Err(e)
             }
+        }
+    }
+
+    fn cancel_session(&self, session_key: &str) {
+        if let Some((_, token)) = self.cancels.remove(session_key) {
+            token.cancel();
+            info!("Cancelled in-progress transcode for {}", session_key);
+        }
+    }
+
+    pub fn cancel_media(&self, media_id: &str) {
+        if let Some(key) = self.active.get(media_id) {
+            self.cancel_session(key.value());
         }
     }
 
@@ -205,8 +253,8 @@ impl HlsManager {
         if path.exists() { Some(path) } else { None }
     }
 
-    /// Clean up HLS cache for a specific media item
     pub fn cleanup_session(&self, media_id: &str) -> Result<()> {
+        self.cancel_media(media_id);
         if let Some((_, session)) = self.sessions.remove(media_id)
             && session.output_dir.exists()
         {
@@ -216,7 +264,6 @@ impl HlsManager {
         Ok(())
     }
 
-    /// Clean up all expired HLS sessions (older than max_age)
     pub fn cleanup_expired(&self, max_age: std::time::Duration) -> Result<u64> {
         let hls_dir = self.cache_dir.join("hls");
         if !hls_dir.exists() {
@@ -315,5 +362,23 @@ mod tests {
 
         mgr.sessions.get_mut("media1").unwrap().status = HlsStatus::Preparing(42.5);
         assert_eq!(mgr.session_status("media1"), Some(HlsStatus::Preparing(42.5)));
+    }
+
+    #[test]
+    fn cancel_media_cancels_token() {
+        let mgr = test_manager();
+        let token = CancellationToken::new();
+        mgr.cancels.insert("media1".into(), token.clone());
+        mgr.active.insert("media1".into(), "media1".into());
+
+        assert!(!token.is_cancelled());
+        mgr.cancel_media("media1");
+        assert!(token.is_cancelled());
+    }
+
+    #[test]
+    fn cancel_media_noop_when_no_session() {
+        let mgr = test_manager();
+        mgr.cancel_media("nonexistent");
     }
 }

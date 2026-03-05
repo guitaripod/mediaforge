@@ -5,7 +5,7 @@ Personal media server built in Rust. Scans your library, fetches metadata from T
 ## Features
 
 - **Library scanning** with automatic filename parsing (scene naming, SxxExx patterns)
-- **Adaptive bitrate HLS** with 720p + 360p renditions, keyframe-aligned in a single ffmpeg pass, with real-time progress tracking
+- **Adaptive bitrate HLS** with 720p + 360p renditions, keyframe-aligned in a single ffmpeg pass, with real-time progress tracking, seek-to-offset, and cancellation
 - **Direct file streaming** with HTTP Range request support
 - **TMDB metadata** integration (movie/show/episode lookup, poster proxying)
 - **Multi-audio track selection** with per-track language, codec, and channel info
@@ -180,7 +180,8 @@ tailscale ip -4
 | Method | Endpoint | Description |
 |--------|----------|-------------|
 | GET | `/api/stream/:id/info` | Stream info (codec, resolution, transcode needed?) |
-| POST | `/api/stream/:id/hls/prepare` | Start HLS generation (`{ "audio_track_id": "..." }`) |
+| POST | `/api/stream/:id/hls/prepare` | Start HLS generation (`{ "audio_track_id": "...", "start_secs": 120.0 }`) |
+| POST | `/api/stream/:id/hls/cancel` | Cancel in-progress transcode |
 | GET | `/api/stream/:id/hls/status` | Check HLS readiness (includes progress %) |
 | GET | `/api/stream/:id/hls/master.m3u8` | HLS master playlist (adaptive bitrate) |
 | GET | `/api/stream/:id/hls/:variant/playlist.m3u8` | HLS variant playlist (720p, 360p, original) |

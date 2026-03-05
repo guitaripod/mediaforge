@@ -29,6 +29,7 @@ pub fn routes() -> Router<Arc<AppState>> {
     Router::new()
         .route("/api/stream/{id}/info", get(stream_info))
         .route("/api/stream/{id}/hls/prepare", post(hls_prepare))
+        .route("/api/stream/{id}/hls/cancel", post(hls_cancel))
         .route("/api/stream/{id}/hls/status", get(hls_status))
         .route("/api/stream/{id}/hls/master.m3u8", get(hls_master))
         .route("/api/stream/{id}/hls/{variant}/playlist.m3u8", get(hls_variant_playlist))
@@ -137,6 +138,7 @@ async fn stream_info(
 #[derive(Deserialize, Default)]
 struct HlsPrepareRequest {
     audio_track_id: Option<String>,
+    start_secs: Option<f64>,
 }
 
 async fn hls_prepare(
@@ -189,6 +191,7 @@ async fn hls_prepare(
         None
     };
 
+    let start_secs = req.start_secs;
     let hls = state.hls.clone();
     let media_id = id.clone();
     tokio::spawn(async move {
@@ -201,14 +204,24 @@ async fn hls_prepare(
                 audio_stream_index,
                 source_height: video_height,
                 duration_secs,
+                start_secs,
             })
             .await
+            && !e.to_string().contains("cancelled")
         {
             error!("HLS preparation failed for {}: {}", media_id, e);
         }
     });
 
     Ok(Json(serde_json::json!({ "status": "preparing" })).into_response())
+}
+
+async fn hls_cancel(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> AppResult<Json<serde_json::Value>> {
+    state.hls.cancel_media(&id);
+    Ok(Json(serde_json::json!({ "status": "cancelled" })))
 }
 
 async fn hls_status(

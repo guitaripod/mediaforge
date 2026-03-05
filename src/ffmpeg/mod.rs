@@ -4,6 +4,7 @@ use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::Command;
+use tokio_util::sync::CancellationToken;
 use tracing::{debug, warn};
 
 use crate::db::models::{AudioStream, ProbeResult, SubtitleStream};
@@ -17,7 +18,19 @@ pub struct AdaptiveHlsParams {
     pub source_height: i32,
     pub audio_stream_index: Option<i32>,
     pub duration_secs: Option<f64>,
+    pub start_secs: Option<f64>,
     pub on_progress: ProgressCallback,
+    pub cancel: CancellationToken,
+}
+
+pub struct RemuxHlsParams {
+    pub input_path: PathBuf,
+    pub output_dir: PathBuf,
+    pub segment_duration: u32,
+    pub start_secs: Option<f64>,
+    pub transcode_audio: bool,
+    pub audio_stream_index: Option<i32>,
+    pub cancel: CancellationToken,
 }
 
 struct Rendition {
@@ -218,15 +231,12 @@ impl FFmpeg {
         Ok(result)
     }
 
-    pub async fn generate_hls(
-        &self,
-        input_path: &Path,
-        output_dir: &Path,
-        segment_duration: u32,
-        start_time: Option<f64>,
-        transcode_audio: bool,
-        audio_stream_index: Option<i32>,
-    ) -> Result<()> {
+    pub async fn generate_hls(&self, params: RemuxHlsParams) -> Result<()> {
+        let RemuxHlsParams {
+            input_path, output_dir, segment_duration,
+            start_secs, transcode_audio, audio_stream_index, cancel,
+        } = params;
+
         let variant_dir = output_dir.join("original");
         std::fs::create_dir_all(&variant_dir)?;
 
@@ -236,7 +246,7 @@ impl FFmpeg {
         let mut cmd = Command::new(&self.ffmpeg_path);
         cmd.args(["-y", "-hide_banner", "-loglevel", "warning"]);
 
-        if let Some(start) = start_time {
+        if let Some(start) = start_secs {
             cmd.args(["-ss", &format!("{:.2}", start)]);
         }
 
@@ -245,7 +255,7 @@ impl FFmpeg {
             None => "0:a:0".to_string(),
         };
 
-        cmd.arg("-i").arg(input_path);
+        cmd.arg("-i").arg(&input_path);
         cmd.args(["-map", "0:v:0", "-map", &audio_map, "-c:v", "copy"]);
 
         if transcode_audio {
@@ -271,16 +281,42 @@ impl FFmpeg {
 
         debug!("Running HLS remux: {:?}", cmd);
 
-        let output = cmd
-            .stdout(Stdio::piped())
+        let mut child = cmd
+            .stdout(Stdio::null())
             .stderr(Stdio::piped())
-            .output()
-            .await
-            .context("Failed to run ffmpeg for HLS")?;
+            .spawn()
+            .context("Failed to spawn ffmpeg for HLS")?;
 
-        if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            anyhow::bail!("FFmpeg HLS generation failed: {}", stderr);
+        let stderr = child.stderr.take()
+            .context("Failed to capture ffmpeg stderr")?;
+
+        let cancelled = tokio::select! {
+            result = async {
+                let mut lines = BufReader::new(stderr).lines();
+                let mut last = String::new();
+                while let Some(line) = lines.next_line().await? {
+                    last = line;
+                }
+                Ok::<_, anyhow::Error>(last)
+            } => {
+                result?;
+                false
+            }
+            _ = cancel.cancelled() => true,
+        };
+
+        if cancelled {
+            child.kill().await.ok();
+            child.wait().await.ok();
+            if output_dir.exists() {
+                std::fs::remove_dir_all(output_dir).ok();
+            }
+            anyhow::bail!("Transcode cancelled");
+        }
+
+        let status = child.wait().await?;
+        if !status.success() {
+            anyhow::bail!("FFmpeg HLS generation failed");
         }
 
         let master = "#EXTM3U\n#EXT-X-VERSION:3\n#EXT-X-STREAM-INF:BANDWIDTH=20000000\noriginal/playlist.m3u8\n";
@@ -296,7 +332,7 @@ impl FFmpeg {
         let AdaptiveHlsParams {
             input_path, output_dir, segment_duration,
             source_height, audio_stream_index,
-            duration_secs, on_progress,
+            duration_secs, start_secs, on_progress, cancel,
         } = params;
 
         let audio_map = match audio_stream_index {
@@ -313,6 +349,11 @@ impl FFmpeg {
 
         let mut cmd = Command::new(&self.ffmpeg_path);
         cmd.args(["-y", "-hide_banner", "-loglevel", "warning"]);
+
+        if let Some(start) = start_secs {
+            cmd.args(["-ss", &format!("{:.2}", start)]);
+        }
+
         cmd.arg("-i").arg(&input_path);
 
         for _ in &active {
@@ -370,21 +411,44 @@ impl FFmpeg {
         let mut lines = BufReader::new(stderr).lines();
         let mut last_stderr = String::new();
 
-        while let Some(line) = lines.next_line().await? {
-            if let Some(duration) = duration_secs
-                && duration > 0.0
-                && let Some(time_str) = line.strip_prefix("out_time_us=")
-                && let Ok(us) = time_str.trim().parse::<i64>()
-            {
-                let secs = us as f64 / 1_000_000.0;
-                let pct = (secs / duration * 100.0).min(100.0) as f32;
-                on_progress(pct);
+        let effective_duration = match (duration_secs, start_secs) {
+            (Some(d), Some(s)) => Some((d - s).max(0.0)),
+            (Some(d), None) => Some(d),
+            _ => None,
+        };
+
+        let cancelled = loop {
+            tokio::select! {
+                line = lines.next_line() => {
+                    let Some(line) = line? else { break false };
+                    if let Some(duration) = effective_duration
+                        && duration > 0.0
+                        && let Some(time_str) = line.strip_prefix("out_time_us=")
+                        && let Ok(us) = time_str.trim().parse::<i64>()
+                    {
+                        let secs = us as f64 / 1_000_000.0;
+                        let pct = (secs / duration * 100.0).min(100.0) as f32;
+                        on_progress(pct);
+                    }
+                    let is_progress_line = line.starts_with("out_time") || line.starts_with("frame=") || line.starts_with("progress=") || line.starts_with("bitrate=") || line.starts_with("total_size=") || line.starts_with("speed=") || line.starts_with("stream_") || line.starts_with("dup_frames=") || line.starts_with("drop_frames=") || line.starts_with("fps=");
+                    if !is_progress_line {
+                        last_stderr.push_str(&line);
+                        last_stderr.push('\n');
+                    }
+                }
+                _ = cancel.cancelled() => {
+                    break true;
+                }
             }
-            let is_progress_line = line.starts_with("out_time") || line.starts_with("frame=") || line.starts_with("progress=") || line.starts_with("bitrate=") || line.starts_with("total_size=") || line.starts_with("speed=") || line.starts_with("stream_") || line.starts_with("dup_frames=") || line.starts_with("drop_frames=") || line.starts_with("fps=");
-            if !is_progress_line {
-                last_stderr.push_str(&line);
-                last_stderr.push('\n');
+        };
+
+        if cancelled {
+            child.kill().await.ok();
+            child.wait().await.ok();
+            if output_dir.exists() {
+                std::fs::remove_dir_all(&output_dir).ok();
             }
+            anyhow::bail!("Transcode cancelled");
         }
 
         let status = child.wait().await?;
