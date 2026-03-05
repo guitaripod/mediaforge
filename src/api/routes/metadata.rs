@@ -38,9 +38,15 @@ async fn trigger_scan(State(state): State<Arc<AppState>>) -> AppResult<Json<serd
                 status.set_items_found(count);
                 if tmdb.has_key() {
                     status.start_metadata();
-                    let _ = tmdb.migrate_numeric_genres(&db).await;
-                    let _ = tmdb.update_movie_metadata(&db).await;
-                    let _ = tmdb.update_tv_metadata(&db).await;
+                    if let Err(e) = tmdb.migrate_numeric_genres(&db).await {
+                        error!("Genre migration failed: {}", e);
+                    }
+                    if let Err(e) = tmdb.update_movie_metadata(&db).await {
+                        error!("Movie metadata update failed: {}", e);
+                    }
+                    if let Err(e) = tmdb.update_tv_metadata(&db).await {
+                        error!("TV metadata update failed: {}", e);
+                    }
                 }
                 status.finish();
             }

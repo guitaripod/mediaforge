@@ -29,7 +29,7 @@ async fn get_playback(
         media_id: id,
         position_secs: 0.0,
         is_watched: false,
-        last_played_at: String::new(),
+        last_played_at: None,
     })))
 }
 

@@ -10,7 +10,7 @@ use serde::{Deserialize, Serialize};
 const MAX_SEARCH_LENGTH: usize = 200;
 
 use crate::api::error::AppResult;
-use crate::api::helpers::{get_playback_state, get_subtitles_for_media, media_item_from_row, MEDIA_ITEM_COLUMNS};
+use crate::api::helpers::{get_audio_tracks_for_media, get_playback_state, get_subtitles_for_media, media_item_from_row, MEDIA_ITEM_COLUMNS};
 use crate::api::AppState;
 use crate::db::models::{EpisodeSummary, MediaItem, MovieSummary, TvShow, TvShowSummary};
 
@@ -114,11 +114,13 @@ async fn get_movie(
         Some(movie) => {
             let subtitles = get_subtitles_for_media(&conn, &movie.id)?;
             let playback = get_playback_state(&conn, &movie.id)?;
+            let audio_tracks = get_audio_tracks_for_media(&conn, &movie.id)?;
 
             Ok(Json(serde_json::json!({
                 "item": movie,
                 "subtitles": subtitles,
                 "playback": playback,
+                "audio_tracks": audio_tracks,
             }))
             .into_response())
         }
@@ -319,11 +321,13 @@ async fn get_episode(
         Some(episode) => {
             let subtitles = get_subtitles_for_media(&conn, &episode.id)?;
             let playback = get_playback_state(&conn, &episode.id)?;
+            let audio_tracks = get_audio_tracks_for_media(&conn, &episode.id)?;
 
             Ok(Json(serde_json::json!({
                 "item": episode,
                 "subtitles": subtitles,
                 "playback": playback,
+                "audio_tracks": audio_tracks,
             }))
             .into_response())
         }
@@ -433,6 +437,20 @@ async fn recent_items(
     Ok(Json(items))
 }
 
+#[derive(Serialize)]
+struct SearchResult {
+    id: String,
+    title: String,
+    year: Option<i32>,
+    poster_path: Option<String>,
+    rating: Option<f64>,
+    duration_secs: Option<f64>,
+    video_width: Option<i32>,
+    video_height: Option<i32>,
+    hdr_format: Option<String>,
+    media_type: String,
+}
+
 #[derive(Deserialize)]
 struct SearchParams {
     q: String,
@@ -454,14 +472,14 @@ async fn search_library(
     let query = format!("%{}%", escaped);
 
     let mut stmt = conn.prepare(
-        "SELECT id, title, year, poster_path, rating, duration_secs, video_width, video_height, hdr_format
+        "SELECT id, title, year, poster_path, rating, duration_secs, video_width, video_height, hdr_format, media_type
          FROM media_items WHERE title LIKE ?1 ESCAPE '\\' OR show_name LIKE ?1 ESCAPE '\\' OR episode_title LIKE ?1 ESCAPE '\\'
          ORDER BY sort_title LIMIT 50",
     )?;
 
-    let items: Vec<MovieSummary> = stmt
+    let items: Vec<SearchResult> = stmt
         .query_map([&query], |row| {
-            Ok(MovieSummary {
+            Ok(SearchResult {
                 id: row.get(0)?,
                 title: row.get(1)?,
                 year: row.get(2)?,
@@ -471,6 +489,7 @@ async fn search_library(
                 video_width: row.get(6)?,
                 video_height: row.get(7)?,
                 hdr_format: row.get(8)?,
+                media_type: row.get(9)?,
             })
         })?
         .filter_map(|r| r.ok())

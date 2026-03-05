@@ -110,7 +110,7 @@ pub struct PlaybackState {
     pub media_id: String,
     pub position_secs: f64,
     pub is_watched: bool,
-    pub last_played_at: String,
+    pub last_played_at: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
