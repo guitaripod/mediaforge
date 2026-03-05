@@ -226,7 +226,7 @@ impl FFmpeg {
         Ok(())
     }
 
-    /// Generate HLS with video transcoding (for non-iOS-compatible codecs)
+    /// Generate HLS with video transcoding (for incompatible codecs)
     pub async fn generate_hls_transcode(
         &self,
         input_path: &Path,
@@ -354,7 +354,7 @@ impl FFmpeg {
         Ok(())
     }
 
-    /// Check if a video codec is natively playable on iOS
+    /// Check if a video codec can be direct-played
     pub fn is_ios_native_video(codec: &str) -> bool {
         matches!(
             codec.to_lowercase().as_str(),
@@ -362,7 +362,7 @@ impl FFmpeg {
         )
     }
 
-    /// Check if an audio codec needs transcoding for iOS
+    /// Check if an audio codec needs transcoding
     pub fn needs_audio_transcode(codec: &str) -> bool {
         matches!(
             codec.to_lowercase().as_str(),

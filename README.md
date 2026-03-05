@@ -1,28 +1,32 @@
 # MediaForge
 
-Personal media server built in Rust. Designed as a Plex alternative with an iOS-first streaming architecture using HLS and Apple's native `AVPlayerViewController`.
+Personal media server built in Rust. Scans your library, fetches metadata from TMDB, and serves media over HTTP with HLS transcoding and direct streaming.
 
 ## Features
 
 - **Library scanning** with automatic filename parsing (scene naming, SxxExx patterns)
-- **HLS streaming** with on-the-fly transcoding for non-iOS-compatible codecs
-- **Direct file streaming** with HTTP Range request support for natively compatible media
+- **HLS streaming** with on-the-fly transcoding for incompatible codecs
+- **Direct file streaming** with HTTP Range request support
 - **TMDB metadata** integration (movie/show/episode lookup, poster proxying)
 - **Playback tracking** (resume position, watched state)
 - **Subtitle support** (embedded extraction to WebVTT, external SRT/VTT serving)
-- **Smart codec detection** — copies compatible video streams, only transcodes when necessary
+- **Smart codec detection** — copies compatible streams, only transcodes when necessary
 
-## Supported Formats
+<details>
+<summary><strong>Supported Formats</strong></summary>
 
-| Format | iOS Native? | MediaForge Action |
-|--------|-------------|-------------------|
+| Format | Direct Play? | Action |
+|--------|-------------|--------|
 | H.264/H.265 in MP4 | Yes | Direct stream |
 | H.265 in MKV | No (container) | HLS remux (no re-encode) |
-| AV1 | Yes (iPhone 15+) | Direct or transcode |
-| VC-1, XviD | No | HLS transcode to H.264 |
+| AV1 | Yes | Direct stream |
+| VC-1, XviD, MPEG4 | No | HLS transcode to H.264 |
 | AAC, EAC3, AC3 | Yes | Direct |
 | TrueHD, DTS | No | Transcode to AAC |
 | SRT/VTT subtitles | Yes | Serve as WebVTT |
+| PGS/VOBSUB subtitles | No | Returns 422 (bitmap-based) |
+
+</details>
 
 ## Setup
 
@@ -48,7 +52,7 @@ host = "0.0.0.0"
 port = 8484
 
 [library]
-media_dirs = ["/mnt/stuff2/Movies", "/mnt/stuff2/TV Shows"]
+media_dirs = ["/path/to/Movies", "/path/to/TV Shows"]
 scan_interval_secs = 300
 
 [tmdb]
@@ -66,20 +70,14 @@ max_concurrent_transcodes = 2
 ### Run
 
 ```sh
-# Start the server (default command)
 mediaforge serve
-
-# Run a one-time scan with TMDB metadata fetch
 mediaforge scan
-
-# Show current config
 mediaforge config show
-
-# Custom config path
 mediaforge -c /path/to/config.toml serve
 ```
 
-## API Reference
+<details>
+<summary><strong>API Reference</strong></summary>
 
 ### Library
 
@@ -135,10 +133,13 @@ mediaforge -c /path/to/config.toml serve
 | GET | `/api/system/stats` | Library statistics |
 | GET | `/api/system/config` | Current config (API key redacted) |
 
-## Architecture
+</details>
+
+<details>
+<summary><strong>Architecture</strong></summary>
 
 ```
-iOS App (AVPlayerViewController)
+Client (any HTTP client)
         |
         | HTTP (JSON + HLS)
         v
@@ -148,9 +149,7 @@ MediaForge (Rust/Axum)
   ├── TMDB Metadata Client
   ├── HLS Session Manager (DashMap + Semaphore)
   ├── FFmpeg Wrapper (probe, HLS, remux, subtitles)
-  └── SQLite Database (WAL mode)
+  └── SQLite Database (WAL mode, r2d2 pool)
 ```
 
-## License
-
-MIT
+</details>
