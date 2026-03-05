@@ -144,6 +144,24 @@ async fn run_server(config: Config) -> anyhow::Result<()> {
         }
     });
 
+    let cleanup_db = db.clone();
+    tokio::spawn(async move {
+        let mut interval = tokio::time::interval(Duration::from_secs(86400));
+        interval.tick().await;
+        loop {
+            interval.tick().await;
+            let conn = cleanup_db.conn();
+            match conn.execute(
+                "DELETE FROM activity_log WHERE created_at < datetime('now', '-90 days')",
+                [],
+            ) {
+                Ok(n) if n > 0 => info!("Pruned {} old activity log entries", n),
+                Err(e) => error!("Activity log cleanup failed: {}", e),
+                _ => {}
+            }
+        }
+    });
+
     let addr = format!("{}:{}", config.server.host, config.server.port);
     let listener = TcpListener::bind(&addr).await?;
     info!("MediaForge listening on http://{}", addr);
