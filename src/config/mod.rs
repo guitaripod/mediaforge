@@ -49,8 +49,8 @@ impl Default for Config {
             },
             library: LibraryConfig {
                 media_dirs: vec![
-                    PathBuf::from("/mnt/stuff2/Movies"),
-                    PathBuf::from("/mnt/stuff2/TV Shows"),
+                    PathBuf::from("/path/to/Movies"),
+                    PathBuf::from("/path/to/TV Shows"),
                 ],
                 scan_interval_secs: 300,
             },

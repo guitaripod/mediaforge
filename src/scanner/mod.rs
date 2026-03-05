@@ -186,58 +186,56 @@ impl Scanner {
             updated_at: chrono::Utc::now().to_rfc3339(),
         };
 
-        {
-            let conn = self.db.conn();
-            conn.execute(
-                "INSERT OR REPLACE INTO media_items (
-                    id, title, sort_title, media_type, year, file_path, file_size,
-                    duration_secs, video_codec, video_width, video_height, video_bitrate,
-                    hdr_format, audio_codec, audio_channels, audio_bitrate,
-                    show_name, season_number, episode_number, episode_title,
-                    tmdb_id, overview, poster_path, backdrop_path, genres, rating,
-                    release_date, added_at, updated_at
-                ) VALUES (
-                    ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14,
-                    ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25, ?26,
-                    ?27, ?28, ?29
-                )",
-                rusqlite::params![
-                    item.id,
-                    item.title,
-                    item.sort_title,
-                    item.media_type.to_string(),
-                    item.year,
-                    item.file_path,
-                    item.file_size,
-                    item.duration_secs,
-                    item.video_codec,
-                    item.video_width,
-                    item.video_height,
-                    item.video_bitrate,
-                    item.hdr_format,
-                    item.audio_codec,
-                    item.audio_channels,
-                    item.audio_bitrate,
-                    item.show_name,
-                    item.season_number,
-                    item.episode_number,
-                    item.episode_title,
-                    item.tmdb_id,
-                    item.overview,
-                    item.poster_path,
-                    item.backdrop_path,
-                    item.genres,
-                    item.rating,
-                    item.release_date,
-                    item.added_at,
-                    item.updated_at,
-                ],
-            )?;
-        }
+        let conn = self.db.conn();
+
+        conn.execute(
+            "INSERT OR REPLACE INTO media_items (
+                id, title, sort_title, media_type, year, file_path, file_size,
+                duration_secs, video_codec, video_width, video_height, video_bitrate,
+                hdr_format, audio_codec, audio_channels, audio_bitrate,
+                show_name, season_number, episode_number, episode_title,
+                tmdb_id, overview, poster_path, backdrop_path, genres, rating,
+                release_date, added_at, updated_at
+            ) VALUES (
+                ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14,
+                ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25, ?26,
+                ?27, ?28, ?29
+            )",
+            rusqlite::params![
+                item.id,
+                item.title,
+                item.sort_title,
+                item.media_type.to_string(),
+                item.year,
+                item.file_path,
+                item.file_size,
+                item.duration_secs,
+                item.video_codec,
+                item.video_width,
+                item.video_height,
+                item.video_bitrate,
+                item.hdr_format,
+                item.audio_codec,
+                item.audio_channels,
+                item.audio_bitrate,
+                item.show_name,
+                item.season_number,
+                item.episode_number,
+                item.episode_title,
+                item.tmdb_id,
+                item.overview,
+                item.poster_path,
+                item.backdrop_path,
+                item.genres,
+                item.rating,
+                item.release_date,
+                item.added_at,
+                item.updated_at,
+            ],
+        )?;
 
         for sub_stream in &probe.subtitle_streams {
             let sub_id = Uuid::new_v4().to_string();
-            let conn = self.db.conn();
             conn.execute(
                 "INSERT INTO subtitles (id, media_id, stream_index, language, codec, is_forced, is_default, is_external)
                  VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 0)",
@@ -264,7 +262,6 @@ impl Scanner {
                     .unwrap_or("srt")
                     .to_string();
                 let sub_id = Uuid::new_v4().to_string();
-                let conn = self.db.conn();
                 conn.execute(
                     "INSERT INTO subtitles (id, media_id, file_path, language, codec, is_forced, is_default, is_external)
                      VALUES (?1, ?2, ?3, ?4, ?5, 0, 0, 1)",
@@ -282,7 +279,6 @@ impl Scanner {
         if parsed.media_type == MediaType::Episode
             && let Some(ref show_name) = parsed.show_name
         {
-            let conn = self.db.conn();
             let exists: bool = conn
                 .query_row(
                     "SELECT COUNT(*) FROM tv_shows WHERE name = ?1",

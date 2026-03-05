@@ -864,7 +864,11 @@ async fn serve_subtitle(
 fn srt_to_vtt(srt: &str) -> String {
     let mut vtt = String::from("WEBVTT\n\n");
     for line in srt.lines() {
-        vtt.push_str(&line.replace(',', "."));
+        if line.contains(" --> ") {
+            vtt.push_str(&line.replace(',', "."));
+        } else {
+            vtt.push_str(line);
+        }
         vtt.push('\n');
     }
     vtt
@@ -955,23 +959,38 @@ async fn proxy_image(
 
     let cache_key = format!("{}/{}", query.size, safe_name);
 
-    if let Some(tx) = state.image_fetches.get(&cache_key) {
-        let mut rx = tx.subscribe();
-        drop(tx);
-        let _ = rx.recv().await;
+    let is_leader;
+    let rx = {
+        let entry = state.image_fetches.entry(cache_key.clone());
+        match entry {
+            dashmap::mapref::entry::Entry::Occupied(e) => {
+                is_leader = false;
+                Some(e.get().subscribe())
+            }
+            dashmap::mapref::entry::Entry::Vacant(e) => {
+                is_leader = true;
+                let (tx, _) = broadcast::channel(1);
+                e.insert(tx);
+                None
+            }
+        }
+    };
+
+    if !is_leader {
+        if let Some(mut rx) = rx {
+            let _ = rx.recv().await;
+        }
         if cache_path.exists() {
             return serve_cached_image(&cache_path, content_type).await;
         }
         return Ok(StatusCode::NOT_FOUND.into_response());
     }
 
-    let (tx, _) = broadcast::channel(1);
-    state.image_fetches.insert(cache_key.clone(), tx.clone());
-
     let result = fetch_and_cache_image(&tmdb_path, &query.size, &size_dir, &cache_path).await;
 
-    let _ = tx.send(());
-    state.image_fetches.remove(&cache_key);
+    if let Some((_, tx)) = state.image_fetches.remove(&cache_key) {
+        let _ = tx.send(());
+    }
 
     match result {
         Ok(data) => Ok(image_response(content_type, Body::from(data))),
@@ -1251,6 +1270,14 @@ mod tests {
         let srt = "1\n00:01:23,456 --> 00:04:56,789\nText\n";
         let vtt = srt_to_vtt(srt);
         assert!(vtt.contains("00:01:23.456 --> 00:04:56.789"));
+    }
+
+    #[test]
+    fn srt_to_vtt_preserves_commas_in_dialogue() {
+        let srt = "1\n00:00:00,000 --> 00:00:01,000\nHello, world\n";
+        let vtt = srt_to_vtt(srt);
+        assert!(vtt.contains("Hello, world"));
+        assert!(vtt.contains("00:00:00.000 --> 00:00:01.000"));
     }
 
     #[test]

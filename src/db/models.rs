@@ -7,6 +7,7 @@ pub struct MediaItem {
     pub sort_title: String,
     pub media_type: MediaType,
     pub year: Option<i32>,
+    #[serde(skip_serializing)]
     pub file_path: String,
     pub file_size: i64,
     pub duration_secs: Option<f64>,
