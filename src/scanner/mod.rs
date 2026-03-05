@@ -238,6 +238,25 @@ impl Scanner {
             ],
         )?;
 
+        for audio_stream in &probe.audio_streams {
+            let track_id = Uuid::new_v4().to_string();
+            tx.execute(
+                "INSERT INTO audio_tracks (id, media_id, stream_index, codec, language, channels, bitrate, is_default, title)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+                rusqlite::params![
+                    track_id,
+                    id,
+                    audio_stream.index,
+                    audio_stream.codec,
+                    audio_stream.language,
+                    audio_stream.channels,
+                    audio_stream.bitrate,
+                    audio_stream.is_default as i32,
+                    audio_stream.title,
+                ],
+            )?;
+        }
+
         for sub_stream in &probe.subtitle_streams {
             let sub_id = Uuid::new_v4().to_string();
             tx.execute(

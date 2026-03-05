@@ -5,7 +5,7 @@ use std::process::Stdio;
 use tokio::process::Command;
 use tracing::{debug, warn};
 
-use crate::db::models::{ProbeResult, SubtitleStream};
+use crate::db::models::{AudioStream, ProbeResult, SubtitleStream};
 
 #[derive(Clone)]
 pub struct FFmpeg {
@@ -101,6 +101,7 @@ impl FFmpeg {
             audio_channels: None,
             audio_bitrate: None,
             subtitle_streams: Vec::new(),
+            audio_streams: Vec::new(),
         };
 
         for stream in &streams {
@@ -116,12 +117,32 @@ impl FFmpeg {
                     }
                 }
                 Some("audio") => {
-                    if result.audio_codec.is_none() {
-                        result.audio_codec = stream.codec_name.clone();
-                        result.audio_channels = stream.channels;
-                        result.audio_bitrate =
-                            stream.bit_rate.as_ref().and_then(|b| b.parse().ok());
-                    }
+                    let is_default = stream
+                        .disposition
+                        .get("default")
+                        .and_then(|v| v.as_i64())
+                        .unwrap_or(0)
+                        == 1;
+                    let language = stream
+                        .tags
+                        .get("language")
+                        .and_then(|v| v.as_str())
+                        .map(|s| s.to_string());
+                    let title = stream
+                        .tags
+                        .get("title")
+                        .and_then(|v| v.as_str())
+                        .map(|s| s.to_string());
+
+                    result.audio_streams.push(AudioStream {
+                        index: stream.index,
+                        codec: stream.codec_name.clone().unwrap_or_default(),
+                        language,
+                        channels: stream.channels,
+                        bitrate: stream.bit_rate.as_ref().and_then(|b| b.parse().ok()),
+                        is_default,
+                        title,
+                    });
                 }
                 Some("subtitle") => {
                     let is_forced = stream
@@ -154,6 +175,12 @@ impl FFmpeg {
             }
         }
 
+        if let Some(first_audio) = result.audio_streams.first() {
+            result.audio_codec = Some(first_audio.codec.clone());
+            result.audio_channels = first_audio.channels;
+            result.audio_bitrate = first_audio.bitrate;
+        }
+
         Ok(result)
     }
 
@@ -164,6 +191,7 @@ impl FFmpeg {
         segment_duration: u32,
         start_time: Option<f64>,
         transcode_audio: bool,
+        audio_stream_index: Option<i32>,
     ) -> Result<()> {
         std::fs::create_dir_all(output_dir)?;
 
@@ -177,8 +205,13 @@ impl FFmpeg {
             cmd.args(["-ss", &format!("{:.2}", start)]);
         }
 
+        let audio_map = match audio_stream_index {
+            Some(idx) => format!("0:{}", idx),
+            None => "0:a:0".to_string(),
+        };
+
         cmd.arg("-i").arg(input_path);
-        cmd.args(["-map", "0:v:0", "-map", "0:a:0", "-c:v", "copy"]);
+        cmd.args(["-map", "0:v:0", "-map", &audio_map, "-c:v", "copy"]);
 
         if transcode_audio {
             cmd.args(["-c:a", "aac", "-b:a", "192k", "-ac", "2"]);
@@ -223,17 +256,23 @@ impl FFmpeg {
         output_dir: &Path,
         segment_duration: u32,
         target_height: Option<i32>,
+        audio_stream_index: Option<i32>,
     ) -> Result<()> {
         std::fs::create_dir_all(output_dir)?;
 
         let playlist_path = output_dir.join("playlist.m3u8");
         let segment_pattern = output_dir.join("segment_%04d.ts");
 
+        let audio_map = match audio_stream_index {
+            Some(idx) => format!("0:{}", idx),
+            None => "0:a:0".to_string(),
+        };
+
         let mut cmd = Command::new(&self.ffmpeg_path);
         cmd.args(["-y", "-hide_banner", "-loglevel", "warning"]);
         cmd.arg("-i").arg(input_path);
 
-        cmd.args(["-map", "0:v:0", "-map", "0:a:0"]);
+        cmd.args(["-map", "0:v:0", "-map", &audio_map]);
 
         // Video: transcode to h264 for maximum compatibility
         cmd.args(["-c:v", "libx264", "-preset", "fast", "-crf", "22"]);

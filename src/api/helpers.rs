@@ -1,4 +1,4 @@
-use crate::db::models::{MediaItem, MediaType, PlaybackState, Subtitle};
+use crate::db::models::{AudioTrack, MediaItem, MediaType, PlaybackState, Subtitle};
 
 pub const MEDIA_ITEM_COLUMNS: &str =
     "id, title, sort_title, media_type, year, file_path, file_size,
@@ -72,6 +72,35 @@ pub fn get_subtitles_for_media(
         .collect();
 
     Ok(subs)
+}
+
+pub fn get_audio_tracks_for_media(
+    conn: &rusqlite::Connection,
+    media_id: &str,
+) -> Result<Vec<AudioTrack>, rusqlite::Error> {
+    let mut stmt = conn.prepare(
+        "SELECT id, media_id, stream_index, codec, language, channels, bitrate, is_default, title
+         FROM audio_tracks WHERE media_id = ?1 ORDER BY stream_index",
+    )?;
+
+    let tracks = stmt
+        .query_map([media_id], |row| {
+            Ok(AudioTrack {
+                id: row.get(0)?,
+                media_id: row.get(1)?,
+                stream_index: row.get(2)?,
+                codec: row.get(3)?,
+                language: row.get(4)?,
+                channels: row.get(5)?,
+                bitrate: row.get(6)?,
+                is_default: row.get::<_, i32>(7)? != 0,
+                title: row.get(8)?,
+            })
+        })?
+        .filter_map(|r| r.ok())
+        .collect();
+
+    Ok(tracks)
 }
 
 pub fn get_playback_state(
