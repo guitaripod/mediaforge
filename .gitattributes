@@ -1,1 +1,2 @@
 scripts/* linguist-vendored
+Dockerfile linguist-detectable=false
