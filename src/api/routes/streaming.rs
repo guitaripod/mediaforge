@@ -1,21 +1,26 @@
 use std::sync::{Arc, LazyLock};
 
 use axum::body::Body;
-use axum::extract::{Path, State};
+use axum::extract::{Path, Query, State};
 use axum::http::{header, HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Json, Response};
 use axum::routing::{get, post};
 use axum::Router;
 use regex::Regex;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
+
+#[derive(Deserialize)]
+struct AudioTrackQuery {
+    audio_track: Option<i32>,
+}
 use tokio::io::AsyncSeekExt;
 use tokio_util::io::ReaderStream;
 use tracing::error;
 
 use crate::api::error::AppResult;
-use crate::api::helpers::get_subtitles_for_media;
+use crate::api::helpers::{get_audio_tracks_for_media, get_subtitles_for_media};
 use crate::api::AppState;
-use crate::db::models::Subtitle;
+use crate::db::models::{AudioTrack, Subtitle};
 use crate::ffmpeg::FFmpeg;
 use crate::hls::HlsStatus;
 
@@ -46,6 +51,7 @@ struct StreamInfo {
     needs_transcode: bool,
     can_direct_play: bool,
     subtitles: Vec<Subtitle>,
+    audio_tracks: Vec<AudioTrack>,
 }
 
 struct StreamInfoRow {
@@ -105,6 +111,7 @@ async fn stream_info(
         .unwrap_or(true);
 
     let subtitles = get_subtitles_for_media(&conn, &id)?;
+    let audio_tracks = get_audio_tracks_for_media(&conn, &id)?;
 
     Ok(Json(StreamInfo {
         id: item.id,
@@ -118,13 +125,20 @@ async fn stream_info(
         needs_transcode,
         can_direct_play: can_direct,
         subtitles,
+        audio_tracks,
     })
     .into_response())
+}
+
+#[derive(Deserialize, Default)]
+struct HlsPrepareRequest {
+    audio_track_id: Option<String>,
 }
 
 async fn hls_prepare(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
+    body: Option<Json<HlsPrepareRequest>>,
 ) -> AppResult<Response> {
     let conn = state.db.conn();
 
@@ -136,11 +150,38 @@ async fn hls_prepare(
         )
         .ok();
 
-    let Some((file_path, video_codec, audio_codec)) = item else {
+    let Some((file_path, video_codec, mut audio_codec)) = item else {
         return Ok(
             (StatusCode::NOT_FOUND, Json(serde_json::json!({ "error": "Not found" })))
                 .into_response(),
         );
+    };
+
+    let req = body.map(|b| b.0).unwrap_or_default();
+    let audio_stream_index = if let Some(ref track_id) = req.audio_track_id {
+        let track: Option<(i32, String)> = conn
+            .query_row(
+                "SELECT stream_index, codec FROM audio_tracks WHERE id = ?1 AND media_id = ?2",
+                rusqlite::params![track_id, id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .ok();
+
+        match track {
+            Some((idx, codec)) => {
+                audio_codec = Some(codec);
+                Some(idx)
+            }
+            None => {
+                return Ok((
+                    StatusCode::BAD_REQUEST,
+                    Json(serde_json::json!({ "error": "Invalid audio track" })),
+                )
+                    .into_response());
+            }
+        }
+    } else {
+        None
     };
 
     let hls = state.hls.clone();
@@ -152,6 +193,7 @@ async fn hls_prepare(
                 &file_path,
                 video_codec.as_deref(),
                 audio_codec.as_deref(),
+                audio_stream_index,
             )
             .await
         {
@@ -162,11 +204,20 @@ async fn hls_prepare(
     Ok(Json(serde_json::json!({ "status": "preparing" })).into_response())
 }
 
+fn session_key(media_id: &str, audio_track: Option<i32>) -> String {
+    match audio_track {
+        Some(idx) => format!("{}_a{}", media_id, idx),
+        None => media_id.to_string(),
+    }
+}
+
 async fn hls_status(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
+    Query(q): Query<AudioTrackQuery>,
 ) -> AppResult<Json<serde_json::Value>> {
-    let status = state.hls.session_status(&id);
+    let key = session_key(&id, q.audio_track);
+    let status = state.hls.session_status(&key);
     let (status_str, error) = match status {
         Some(HlsStatus::Preparing) => ("preparing", None),
         Some(HlsStatus::Ready) => ("ready", None),
@@ -183,8 +234,10 @@ async fn hls_status(
 async fn hls_playlist(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
+    Query(q): Query<AudioTrackQuery>,
 ) -> AppResult<Response> {
-    let Some(path) = state.hls.playlist_path(&id) else {
+    let key = session_key(&id, q.audio_track);
+    let Some(path) = state.hls.playlist_path(&key) else {
         return Ok(StatusCode::NOT_FOUND.into_response());
     };
 
@@ -199,12 +252,14 @@ async fn hls_playlist(
 async fn hls_segment(
     State(state): State<Arc<AppState>>,
     Path((id, segment)): Path<(String, String)>,
+    Query(q): Query<AudioTrackQuery>,
 ) -> AppResult<Response> {
     if !HLS_SEGMENT_RE.is_match(&segment) {
         return Ok(StatusCode::BAD_REQUEST.into_response());
     }
 
-    let Some(path) = state.hls.segment_path(&id, &segment) else {
+    let key = session_key(&id, q.audio_track);
+    let Some(path) = state.hls.segment_path(&key, &segment) else {
         return Ok(StatusCode::NOT_FOUND.into_response());
     };
 

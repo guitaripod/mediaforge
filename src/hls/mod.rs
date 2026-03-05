@@ -60,18 +60,22 @@ impl HlsManager {
         file_path: &str,
         video_codec: Option<&str>,
         audio_codec: Option<&str>,
+        audio_stream_index: Option<i32>,
     ) -> Result<HlsSession> {
-        // Check if session already exists and is ready
-        if let Some(session) = self.sessions.get(media_id)
+        let session_key = match audio_stream_index {
+            Some(idx) => format!("{}_a{}", media_id, idx),
+            None => media_id.to_string(),
+        };
+
+        if let Some(session) = self.sessions.get(&session_key)
             && session.status == HlsStatus::Ready
         {
             return Ok(session.clone());
         }
 
-        let output_dir = self.cache_dir.join("hls").join(media_id);
+        let output_dir = self.cache_dir.join("hls").join(&session_key);
         let playlist_path = output_dir.join("playlist.m3u8");
 
-        // Check if we already have a cached HLS output
         if playlist_path.exists() {
             let session = HlsSession {
                 media_id: media_id.to_string(),
@@ -81,11 +85,10 @@ impl HlsManager {
                 status: HlsStatus::Ready,
             };
             self.sessions
-                .insert(media_id.to_string(), session.clone());
+                .insert(session_key, session.clone());
             return Ok(session);
         }
 
-        // Determine if we need to transcode video
         let needs_video_transcode = video_codec
             .map(|c| !FFmpeg::is_ios_native_video(c))
             .unwrap_or(true);
@@ -96,7 +99,6 @@ impl HlsManager {
 
         let needs_transcode = needs_video_transcode || needs_audio_transcode;
 
-        // Set status to preparing
         let session = HlsSession {
             media_id: media_id.to_string(),
             output_dir: output_dir.clone(),
@@ -105,25 +107,24 @@ impl HlsManager {
             status: HlsStatus::Preparing,
         };
         self.sessions
-            .insert(media_id.to_string(), session.clone());
+            .insert(session_key.clone(), session.clone());
 
         info!(
-            "Preparing HLS stream for {}: video_transcode={}, audio_transcode={}",
-            media_id, needs_video_transcode, needs_audio_transcode
+            "Preparing HLS stream for {} (audio={:?}): video_transcode={}, audio_transcode={}",
+            media_id, audio_stream_index, needs_video_transcode, needs_audio_transcode
         );
 
-        // Acquire semaphore to limit concurrent transcodes
         let _permit = self.transcode_semaphore.acquire().await?;
 
         let input_path = Path::new(file_path);
 
         let result = if needs_video_transcode {
             self.ffmpeg
-                .generate_hls_transcode(input_path, &output_dir, self.segment_duration, None)
+                .generate_hls_transcode(input_path, &output_dir, self.segment_duration, None, audio_stream_index)
                 .await
         } else {
             self.ffmpeg
-                .generate_hls(input_path, &output_dir, self.segment_duration, None, needs_audio_transcode)
+                .generate_hls(input_path, &output_dir, self.segment_duration, None, needs_audio_transcode, audio_stream_index)
                 .await
         };
 
@@ -137,7 +138,7 @@ impl HlsManager {
                     status: HlsStatus::Ready,
                 };
                 self.sessions
-                    .insert(media_id.to_string(), session.clone());
+                    .insert(session_key, session.clone());
                 info!("HLS stream ready for {}", media_id);
                 Ok(session)
             }
@@ -151,7 +152,7 @@ impl HlsManager {
                     status: HlsStatus::Error(err_msg.clone()),
                 };
                 self.sessions
-                    .insert(media_id.to_string(), session.clone());
+                    .insert(session_key, session.clone());
                 Err(e)
             }
         }
