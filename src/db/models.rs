@@ -220,4 +220,5 @@ pub struct ActivityLogEntry {
     pub position_secs: f64,
     pub created_at: String,
     pub title: Option<String>,
+    pub media_type: Option<String>,
 }

@@ -141,6 +141,7 @@ async fn get_activity_history(
             position_secs: row.get(3)?,
             created_at: row.get(4)?,
             title: row.get(5)?,
+            media_type: row.get(6)?,
         })
     }
 
@@ -151,7 +152,7 @@ async fn get_activity_history(
             |row| row.get(0),
         )?;
         let mut stmt = conn.prepare(
-            "SELECT al.id, al.media_id, al.event_type, al.position_secs, al.created_at, m.title
+            "SELECT al.id, al.media_id, al.event_type, al.position_secs, al.created_at, m.title, m.media_type
              FROM activity_log al
              LEFT JOIN media_items m ON al.media_id = m.id
              WHERE al.media_id = ?1
@@ -169,7 +170,7 @@ async fn get_activity_history(
             |row| row.get(0),
         )?;
         let mut stmt = conn.prepare(
-            "SELECT al.id, al.media_id, al.event_type, al.position_secs, al.created_at, m.title
+            "SELECT al.id, al.media_id, al.event_type, al.position_secs, al.created_at, m.title, m.media_type
              FROM activity_log al
              LEFT JOIN media_items m ON al.media_id = m.id
              ORDER BY al.created_at DESC LIMIT ?1 OFFSET ?2",
