@@ -76,6 +76,27 @@ mediaforge config show
 mediaforge -c /path/to/config.toml serve
 ```
 
+### Install as a service (systemd)
+
+```sh
+cp contrib/mediaforge.service ~/.config/systemd/user/
+# Edit ExecStart path to point to your binary
+systemctl --user daemon-reload
+systemctl --user enable --now mediaforge
+```
+
+Requires lingering for the service to survive logout:
+```sh
+sudo loginctl enable-linger $USER
+```
+
+Manage with:
+```sh
+systemctl --user status mediaforge
+systemctl --user restart mediaforge    # after a rebuild
+journalctl --user -u mediaforge -f     # tail logs
+```
+
 <details>
 <summary><strong>API Reference</strong></summary>
 

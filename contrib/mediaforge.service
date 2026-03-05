@@ -1,0 +1,13 @@
+[Unit]
+Description=MediaForge media server
+After=network-online.target
+
+[Service]
+Type=simple
+ExecStart=%h/Dev/rust/mediaforge/target/release/mediaforge serve
+Restart=on-failure
+RestartSec=5
+Environment=RUST_LOG=info
+
+[Install]
+WantedBy=default.target
