@@ -373,11 +373,12 @@ async fn continue_watching(
     )?;
 
     let mut stmt = conn.prepare(
-        "SELECT m.id, m.title, m.media_type, m.poster_path, m.duration_secs,
+        "SELECT m.id, m.title, m.media_type, COALESCE(m.poster_path, t.poster_path), m.duration_secs,
                 p.position_secs, p.last_played_at,
                 m.show_name, m.season_number, m.episode_number, m.episode_title
          FROM playback_state p
          JOIN media_items m ON m.id = p.media_id
+         LEFT JOIN tv_shows t ON m.show_name = t.name AND m.media_type = 'episode'
          WHERE p.is_watched = 0 AND p.position_secs > 0
          ORDER BY p.last_played_at DESC
          LIMIT ?1",
