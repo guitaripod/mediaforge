@@ -27,6 +27,7 @@ pub struct AppState {
 
 pub struct ScanStatus {
     inner: std::sync::Mutex<ScanStatusInner>,
+    tx: tokio::sync::broadcast::Sender<serde_json::Value>,
 }
 
 struct ScanStatusInner {
@@ -43,62 +44,87 @@ enum ScanPhase {
 
 impl ScanStatus {
     pub fn new() -> Self {
+        let (tx, _) = tokio::sync::broadcast::channel(16);
         Self {
             inner: std::sync::Mutex::new(ScanStatusInner {
                 current: ScanPhase::Idle,
                 last_completed_at: None,
                 last_error: None,
             }),
+            tx,
         }
+    }
+
+    pub fn subscribe(&self) -> tokio::sync::broadcast::Receiver<serde_json::Value> {
+        self.tx.subscribe()
     }
 
     pub fn start_scan(&self) {
-        let mut s = self.inner.lock().unwrap();
-        s.current = ScanPhase::Scanning {
-            started_at: chrono::Utc::now().to_rfc3339(),
-            items_found: 0,
+        let snapshot = {
+            let mut s = self.inner.lock().unwrap();
+            s.current = ScanPhase::Scanning {
+                started_at: chrono::Utc::now().to_rfc3339(),
+                items_found: 0,
+            };
+            s.last_error = None;
+            Self::build_json(&s)
         };
-        s.last_error = None;
+        let _ = self.tx.send(snapshot);
     }
 
     pub fn set_items_found(&self, count: u32) {
-        let mut s = self.inner.lock().unwrap();
-        match &mut s.current {
-            ScanPhase::Scanning { items_found, .. }
-            | ScanPhase::FetchingMetadata { items_found, .. } => *items_found = count,
-            ScanPhase::Idle => {}
-        }
+        let snapshot = {
+            let mut s = self.inner.lock().unwrap();
+            match &mut s.current {
+                ScanPhase::Scanning { items_found, .. }
+                | ScanPhase::FetchingMetadata { items_found, .. } => *items_found = count,
+                ScanPhase::Idle => {}
+            }
+            Self::build_json(&s)
+        };
+        let _ = self.tx.send(snapshot);
     }
 
     pub fn start_metadata(&self) {
-        let mut s = self.inner.lock().unwrap();
-        let (started, found) = match &s.current {
-            ScanPhase::Scanning { started_at, items_found } => {
-                (started_at.clone(), *items_found)
-            }
-            _ => (chrono::Utc::now().to_rfc3339(), 0),
+        let snapshot = {
+            let mut s = self.inner.lock().unwrap();
+            let (started, found) = match &s.current {
+                ScanPhase::Scanning { started_at, items_found } => {
+                    (started_at.clone(), *items_found)
+                }
+                _ => (chrono::Utc::now().to_rfc3339(), 0),
+            };
+            s.current = ScanPhase::FetchingMetadata {
+                started_at: started,
+                items_found: found,
+            };
+            Self::build_json(&s)
         };
-        s.current = ScanPhase::FetchingMetadata {
-            started_at: started,
-            items_found: found,
-        };
+        let _ = self.tx.send(snapshot);
     }
 
     pub fn finish(&self) {
-        let mut s = self.inner.lock().unwrap();
-        s.current = ScanPhase::Idle;
-        s.last_completed_at = Some(chrono::Utc::now().to_rfc3339());
+        let snapshot = {
+            let mut s = self.inner.lock().unwrap();
+            s.current = ScanPhase::Idle;
+            s.last_completed_at = Some(chrono::Utc::now().to_rfc3339());
+            Self::build_json(&s)
+        };
+        let _ = self.tx.send(snapshot);
     }
 
     pub fn fail(&self, error: String) {
-        let mut s = self.inner.lock().unwrap();
-        s.current = ScanPhase::Idle;
-        s.last_completed_at = Some(chrono::Utc::now().to_rfc3339());
-        s.last_error = Some(error);
+        let snapshot = {
+            let mut s = self.inner.lock().unwrap();
+            s.current = ScanPhase::Idle;
+            s.last_completed_at = Some(chrono::Utc::now().to_rfc3339());
+            s.last_error = Some(error);
+            Self::build_json(&s)
+        };
+        let _ = self.tx.send(snapshot);
     }
 
-    pub fn to_json(&self) -> serde_json::Value {
-        let s = self.inner.lock().unwrap();
+    fn build_json(s: &ScanStatusInner) -> serde_json::Value {
         match &s.current {
             ScanPhase::Idle => serde_json::json!({
                 "status": "idle",
@@ -120,6 +146,11 @@ impl ScanStatus {
             }),
         }
     }
+
+    pub fn to_json(&self) -> serde_json::Value {
+        let s = self.inner.lock().unwrap();
+        Self::build_json(&s)
+    }
 }
 
 async fn api_index() -> Json<serde_json::Value> {
@@ -139,6 +170,7 @@ async fn api_index() -> Json<serde_json::Value> {
             "playback": {
                 "state": "/api/playback/{id}/state",
                 "watched": "/api/playback/{id}/watched",
+                "history": "/api/playback/history?media_id={id}&limit=50&offset=0",
             },
             "streaming": {
                 "info": "/api/stream/{id}/info",
@@ -157,6 +189,7 @@ async fn api_index() -> Json<serde_json::Value> {
                 "stats": "/api/system/stats",
                 "config": "/api/system/config",
                 "scan_status": "/api/system/scan-status",
+                "ws": "/api/system/ws",
             },
         },
     }))

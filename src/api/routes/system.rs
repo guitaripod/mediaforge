@@ -1,9 +1,11 @@
 use std::sync::Arc;
 
 use axum::extract::State;
-use axum::response::Json;
+use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
+use axum::response::{Json, Response};
 use axum::routing::get;
 use axum::Router;
+use tracing::debug;
 
 use crate::api::error::AppResult;
 use crate::api::AppState;
@@ -14,6 +16,7 @@ pub fn routes() -> Router<Arc<AppState>> {
         .route("/api/system/stats", get(stats))
         .route("/api/system/config", get(get_config))
         .route("/api/system/scan-status", get(scan_status))
+        .route("/api/system/ws", get(scan_status_ws))
 }
 
 async fn health() -> Json<serde_json::Value> {
@@ -74,4 +77,48 @@ async fn get_config(State(state): State<Arc<AppState>>) -> Json<serde_json::Valu
 
 async fn scan_status(State(state): State<Arc<AppState>>) -> Json<serde_json::Value> {
     Json(state.scan_status.to_json())
+}
+
+async fn scan_status_ws(
+    State(state): State<Arc<AppState>>,
+    ws: WebSocketUpgrade,
+) -> Response {
+    ws.on_upgrade(move |socket| handle_scan_ws(socket, state))
+}
+
+async fn handle_scan_ws(mut socket: WebSocket, state: Arc<AppState>) {
+    let mut rx = state.scan_status.subscribe();
+
+    let initial = state.scan_status.to_json();
+    if socket
+        .send(Message::Text(initial.to_string().into()))
+        .await
+        .is_err()
+    {
+        return;
+    }
+
+    loop {
+        tokio::select! {
+            msg = rx.recv() => {
+                match msg {
+                    Ok(json) => {
+                        if socket.send(Message::Text(json.to_string().into())).await.is_err() {
+                            break;
+                        }
+                    }
+                    Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
+                        debug!("WebSocket client lagged by {} messages", n);
+                    }
+                    Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+                }
+            }
+            msg = socket.recv() => {
+                match msg {
+                    Some(Ok(Message::Close(_))) | None => break,
+                    _ => {}
+                }
+            }
+        }
+    }
 }
