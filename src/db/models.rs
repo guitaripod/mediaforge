@@ -149,6 +149,7 @@ pub struct ProbeResult {
     pub audio_channels: Option<i32>,
     pub audio_bitrate: Option<i64>,
     pub subtitle_streams: Vec<SubtitleStream>,
+    pub audio_streams: Vec<AudioStream>,
 }
 
 #[derive(Debug, Clone)]
@@ -158,4 +159,38 @@ pub struct SubtitleStream {
     pub language: Option<String>,
     pub is_forced: bool,
     pub is_default: bool,
+}
+
+#[derive(Debug, Clone)]
+pub struct AudioStream {
+    pub index: i32,
+    pub codec: String,
+    pub language: Option<String>,
+    pub channels: Option<i32>,
+    pub bitrate: Option<i64>,
+    pub is_default: bool,
+    pub title: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AudioTrack {
+    pub id: String,
+    pub media_id: String,
+    pub stream_index: i32,
+    pub codec: String,
+    pub language: Option<String>,
+    pub channels: Option<i32>,
+    pub bitrate: Option<i64>,
+    pub is_default: bool,
+    pub title: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ActivityLogEntry {
+    pub id: i64,
+    pub media_id: String,
+    pub event_type: String,
+    pub position_secs: f64,
+    pub created_at: String,
+    pub title: Option<String>,
 }

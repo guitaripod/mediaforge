@@ -85,6 +85,26 @@ impl Database {
                 last_played_at TEXT NOT NULL DEFAULT (datetime('now'))
             );
 
+            CREATE TABLE IF NOT EXISTS audio_tracks (
+                id TEXT PRIMARY KEY,
+                media_id TEXT NOT NULL REFERENCES media_items(id) ON DELETE CASCADE,
+                stream_index INTEGER NOT NULL,
+                codec TEXT NOT NULL,
+                language TEXT,
+                channels INTEGER,
+                bitrate INTEGER,
+                is_default INTEGER NOT NULL DEFAULT 0,
+                title TEXT
+            );
+
+            CREATE TABLE IF NOT EXISTS activity_log (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                media_id TEXT NOT NULL REFERENCES media_items(id) ON DELETE CASCADE,
+                event_type TEXT NOT NULL CHECK(event_type IN ('play', 'pause', 'complete', 'position_update')),
+                position_secs REAL NOT NULL DEFAULT 0,
+                created_at TEXT NOT NULL DEFAULT (datetime('now'))
+            );
+
             CREATE TABLE IF NOT EXISTS tv_shows (
                 id TEXT PRIMARY KEY,
                 name TEXT NOT NULL,
@@ -105,6 +125,9 @@ impl Database {
             CREATE INDEX IF NOT EXISTS idx_added_at ON media_items(added_at);
             CREATE INDEX IF NOT EXISTS idx_sort_title ON media_items(sort_title);
             CREATE INDEX IF NOT EXISTS idx_subtitles_media ON subtitles(media_id);
+            CREATE INDEX IF NOT EXISTS idx_audio_tracks_media ON audio_tracks(media_id);
+            CREATE INDEX IF NOT EXISTS idx_activity_media ON activity_log(media_id);
+            CREATE INDEX IF NOT EXISTS idx_activity_created ON activity_log(created_at);
             CREATE INDEX IF NOT EXISTS idx_playback_continue ON playback_state(is_watched, position_secs)
                 WHERE is_watched = 0 AND position_secs > 0;
             ",
@@ -143,6 +166,8 @@ mod tests {
         assert!(tables.contains(&"subtitles".to_string()));
         assert!(tables.contains(&"playback_state".to_string()));
         assert!(tables.contains(&"tv_shows".to_string()));
+        assert!(tables.contains(&"audio_tracks".to_string()));
+        assert!(tables.contains(&"activity_log".to_string()));
     }
 
     #[test]
@@ -159,6 +184,9 @@ mod tests {
         assert!(indexes.contains(&"idx_file_path".to_string()));
         assert!(indexes.contains(&"idx_sort_title".to_string()));
         assert!(indexes.contains(&"idx_playback_continue".to_string()));
+        assert!(indexes.contains(&"idx_audio_tracks_media".to_string()));
+        assert!(indexes.contains(&"idx_activity_media".to_string()));
+        assert!(indexes.contains(&"idx_activity_created".to_string()));
     }
 
     #[test]
@@ -283,5 +311,105 @@ mod tests {
             .query_row("SELECT COUNT(*) FROM media_items", [], |row| row.get(0))
             .unwrap();
         assert_eq!(count, 1);
+    }
+
+    #[test]
+    fn cascade_delete_audio_tracks() {
+        let (db, _dir) = test_db();
+        let conn = db.conn();
+        conn.execute(
+            "INSERT INTO media_items (id, title, sort_title, media_type, file_path, file_size)
+             VALUES ('m1', 'Movie', 'movie', 'movie', '/tmp/m.mkv', 100)",
+            [],
+        ).unwrap();
+        conn.execute(
+            "INSERT INTO audio_tracks (id, media_id, stream_index, codec, language, channels, is_default)
+             VALUES ('a1', 'm1', 1, 'aac', 'eng', 2, 1)",
+            [],
+        ).unwrap();
+        conn.execute(
+            "INSERT INTO audio_tracks (id, media_id, stream_index, codec, language, channels, is_default)
+             VALUES ('a2', 'm1', 2, 'dts', 'jpn', 6, 0)",
+            [],
+        ).unwrap();
+        conn.execute("DELETE FROM media_items WHERE id = 'm1'", []).unwrap();
+
+        let count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM audio_tracks WHERE media_id = 'm1'", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(count, 0);
+    }
+
+    #[test]
+    fn cascade_delete_activity_log() {
+        let (db, _dir) = test_db();
+        let conn = db.conn();
+        conn.execute(
+            "INSERT INTO media_items (id, title, sort_title, media_type, file_path, file_size)
+             VALUES ('m1', 'Movie', 'movie', 'movie', '/tmp/m.mkv', 100)",
+            [],
+        ).unwrap();
+        conn.execute(
+            "INSERT INTO activity_log (media_id, event_type, position_secs) VALUES ('m1', 'play', 0)",
+            [],
+        ).unwrap();
+        conn.execute(
+            "INSERT INTO activity_log (media_id, event_type, position_secs) VALUES ('m1', 'complete', 120)",
+            [],
+        ).unwrap();
+        conn.execute("DELETE FROM media_items WHERE id = 'm1'", []).unwrap();
+
+        let count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM activity_log WHERE media_id = 'm1'", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(count, 0);
+    }
+
+    #[test]
+    fn activity_log_validates_event_type() {
+        let (db, _dir) = test_db();
+        let conn = db.conn();
+        conn.execute(
+            "INSERT INTO media_items (id, title, sort_title, media_type, file_path, file_size)
+             VALUES ('m1', 'Movie', 'movie', 'movie', '/tmp/m.mkv', 100)",
+            [],
+        ).unwrap();
+
+        let result = conn.execute(
+            "INSERT INTO activity_log (media_id, event_type) VALUES ('m1', 'invalid_event')",
+            [],
+        );
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn audio_tracks_multiple_per_media() {
+        let (db, _dir) = test_db();
+        let conn = db.conn();
+        conn.execute(
+            "INSERT INTO media_items (id, title, sort_title, media_type, file_path, file_size)
+             VALUES ('m1', 'Movie', 'movie', 'movie', '/tmp/m.mkv', 100)",
+            [],
+        ).unwrap();
+        conn.execute(
+            "INSERT INTO audio_tracks (id, media_id, stream_index, codec, language, channels, is_default)
+             VALUES ('a1', 'm1', 1, 'aac', 'eng', 2, 1)",
+            [],
+        ).unwrap();
+        conn.execute(
+            "INSERT INTO audio_tracks (id, media_id, stream_index, codec, language, channels, is_default)
+             VALUES ('a2', 'm1', 2, 'ac3', 'jpn', 6, 0)",
+            [],
+        ).unwrap();
+        conn.execute(
+            "INSERT INTO audio_tracks (id, media_id, stream_index, codec, language, channels, is_default, title)
+             VALUES ('a3', 'm1', 3, 'dts', 'eng', 8, 0, 'Commentary')",
+            [],
+        ).unwrap();
+
+        let count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM audio_tracks WHERE media_id = 'm1'", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(count, 3);
     }
 }
