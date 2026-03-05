@@ -195,12 +195,13 @@ impl HlsManager {
     }
 
     /// Clean up all expired HLS sessions (older than max_age)
-    pub fn cleanup_expired(&self, max_age: std::time::Duration) -> Result<()> {
+    pub fn cleanup_expired(&self, max_age: std::time::Duration) -> Result<u64> {
         let hls_dir = self.cache_dir.join("hls");
         if !hls_dir.exists() {
-            return Ok(());
+            return Ok(0);
         }
 
+        let mut removed = 0u64;
         for entry in std::fs::read_dir(&hls_dir)? {
             let entry = entry?;
             let metadata = entry.metadata()?;
@@ -211,10 +212,11 @@ impl HlsManager {
                 let media_id = entry.file_name().to_string_lossy().to_string();
                 self.cleanup_session(&media_id)?;
                 info!("Cleaned up expired HLS session: {}", media_id);
+                removed += 1;
             }
         }
 
-        Ok(())
+        Ok(removed)
     }
 }
 
