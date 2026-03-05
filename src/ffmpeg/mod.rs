@@ -7,6 +7,27 @@ use tracing::{debug, warn};
 
 use crate::db::models::{AudioStream, ProbeResult, SubtitleStream};
 
+struct Rendition {
+    name: &'static str,
+    height: i32,
+    crf: u8,
+    maxrate: &'static str,
+    bufsize: &'static str,
+    audio_bitrate: &'static str,
+}
+
+const RENDITIONS: &[Rendition] = &[
+    Rendition { name: "720p", height: 720, crf: 23, maxrate: "2500k", bufsize: "5000k", audio_bitrate: "128k" },
+    Rendition { name: "360p", height: 360, crf: 26, maxrate: "400k", bufsize: "800k", audio_bitrate: "64k" },
+];
+
+fn active_renditions(source_height: i32) -> Vec<&'static Rendition> {
+    let active: Vec<&Rendition> = RENDITIONS.iter()
+        .filter(|r| r.height < source_height)
+        .collect();
+    if active.is_empty() { vec![&RENDITIONS[1]] } else { active }
+}
+
 #[derive(Clone)]
 pub struct FFmpeg {
     ffmpeg_path: PathBuf,
@@ -193,10 +214,11 @@ impl FFmpeg {
         transcode_audio: bool,
         audio_stream_index: Option<i32>,
     ) -> Result<()> {
-        std::fs::create_dir_all(output_dir)?;
+        let variant_dir = output_dir.join("original");
+        std::fs::create_dir_all(&variant_dir)?;
 
-        let playlist_path = output_dir.join("playlist.m3u8");
-        let segment_pattern = output_dir.join("segment_%04d.ts");
+        let playlist_path = variant_dir.join("playlist.m3u8");
+        let segment_pattern = variant_dir.join("segment_%04d.ts");
 
         let mut cmd = Command::new(&self.ffmpeg_path);
         cmd.args(["-y", "-hide_banner", "-loglevel", "warning"]);
@@ -226,13 +248,15 @@ impl FFmpeg {
             &segment_duration.to_string(),
             "-hls_list_size",
             "0",
+            "-hls_playlist_type",
+            "vod",
             "-hls_segment_filename",
         ]);
 
         cmd.arg(&segment_pattern);
         cmd.arg(&playlist_path);
 
-        debug!("Running HLS generation: {:?}", cmd);
+        debug!("Running HLS remux: {:?}", cmd);
 
         let output = cmd
             .stdout(Stdio::piped())
@@ -246,70 +270,88 @@ impl FFmpeg {
             anyhow::bail!("FFmpeg HLS generation failed: {}", stderr);
         }
 
+        let master = "#EXTM3U\n#EXT-X-VERSION:3\n#EXT-X-STREAM-INF:BANDWIDTH=20000000\noriginal/playlist.m3u8\n";
+        std::fs::write(output_dir.join("master.m3u8"), master)?;
+
         Ok(())
     }
 
-    /// Generate HLS with video transcoding (for incompatible codecs)
-    pub async fn generate_hls_transcode(
+    pub async fn generate_hls_adaptive(
         &self,
         input_path: &Path,
         output_dir: &Path,
         segment_duration: u32,
-        target_height: Option<i32>,
+        source_height: i32,
         audio_stream_index: Option<i32>,
     ) -> Result<()> {
-        std::fs::create_dir_all(output_dir)?;
-
-        let playlist_path = output_dir.join("playlist.m3u8");
-        let segment_pattern = output_dir.join("segment_%04d.ts");
-
         let audio_map = match audio_stream_index {
             Some(idx) => format!("0:{}", idx),
             None => "0:a:0".to_string(),
         };
 
+        let active = active_renditions(source_height);
+        let skip_scale = source_height <= RENDITIONS.last().unwrap().height;
+
+        for r in &active {
+            std::fs::create_dir_all(output_dir.join(r.name))?;
+        }
+
         let mut cmd = Command::new(&self.ffmpeg_path);
         cmd.args(["-y", "-hide_banner", "-loglevel", "warning"]);
         cmd.arg("-i").arg(input_path);
 
-        cmd.args(["-map", "0:v:0", "-map", &audio_map]);
-
-        // Video: transcode to h264 for maximum compatibility
-        cmd.args(["-c:v", "libx264", "-preset", "fast", "-crf", "22"]);
-
-        if let Some(height) = target_height {
-            cmd.args([
-                "-vf",
-                &format!("scale=-2:{}", height),
-            ]);
+        for _ in &active {
+            cmd.args(["-map", "0:v:0", "-map", &audio_map]);
         }
 
-        // Audio: AAC
-        cmd.args(["-c:a", "aac", "-b:a", "192k", "-ac", "2"]);
+        cmd.args(["-g", "48", "-keyint_min", "48", "-sc_threshold", "0"]);
+        cmd.args(["-preset", "fast"]);
 
-        // HLS
+        for (i, r) in active.iter().enumerate() {
+            cmd.arg(format!("-c:v:{}", i)).arg("libx264");
+            cmd.arg(format!("-crf:v:{}", i)).arg(r.crf.to_string());
+            cmd.arg(format!("-maxrate:v:{}", i)).arg(r.maxrate);
+            cmd.arg(format!("-bufsize:v:{}", i)).arg(r.bufsize);
+            if !skip_scale {
+                cmd.arg(format!("-filter:v:{}", i)).arg(format!("scale=-2:{}", r.height));
+            }
+            cmd.arg(format!("-c:a:{}", i)).arg("aac");
+            cmd.arg(format!("-b:a:{}", i)).arg(r.audio_bitrate);
+            cmd.arg(format!("-ac:{}", i)).arg("2");
+        }
+
+        let var_map: String = active.iter().enumerate()
+            .map(|(i, r)| format!("v:{},a:{},name:{}", i, i, r.name))
+            .collect::<Vec<_>>()
+            .join(" ");
+
+        cmd.args(["-var_stream_map", &var_map]);
+
         cmd.args([
-            "-f",
-            "hls",
-            "-hls_time",
-            &segment_duration.to_string(),
-            "-hls_list_size",
-            "0",
+            "-f", "hls",
+            "-hls_time", &segment_duration.to_string(),
+            "-hls_list_size", "0",
+            "-hls_playlist_type", "vod",
+            "-hls_flags", "independent_segments",
+            "-master_pl_name", "master.m3u8",
             "-hls_segment_filename",
         ]);
-        cmd.arg(&segment_pattern);
-        cmd.arg(&playlist_path);
+
+        cmd.arg(output_dir.join("%v").join("segment_%04d.ts"));
+        cmd.arg(output_dir.join("%v").join("playlist.m3u8"));
+
+        debug!("Running adaptive HLS transcode: {:?}", cmd);
 
         let output = cmd
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .output()
             .await
-            .context("Failed to run ffmpeg for HLS transcode")?;
+            .context("Failed to run ffmpeg for adaptive HLS")?;
 
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
-            anyhow::bail!("FFmpeg HLS transcode failed: {}", stderr);
+            anyhow::bail!("FFmpeg adaptive HLS failed: {}", stderr);
         }
 
         Ok(())
@@ -495,6 +537,36 @@ mod tests {
             side_data_list: vec![],
         };
         assert_eq!(detect_hdr(&stream), None);
+    }
+
+    fn rendition_names(height: i32) -> Vec<&'static str> {
+        active_renditions(height).iter().map(|r| r.name).collect()
+    }
+
+    #[test]
+    fn renditions_for_1080p() {
+        assert_eq!(rendition_names(1080), vec!["720p", "360p"]);
+    }
+
+    #[test]
+    fn renditions_for_4k() {
+        assert_eq!(rendition_names(2160), vec!["720p", "360p"]);
+    }
+
+    #[test]
+    fn renditions_for_720p() {
+        assert_eq!(rendition_names(720), vec!["360p"]);
+    }
+
+    #[test]
+    fn renditions_for_480p() {
+        assert_eq!(rendition_names(480), vec!["360p"]);
+    }
+
+    #[test]
+    fn renditions_for_360p_or_smaller() {
+        assert_eq!(rendition_names(360), vec!["360p"]);
+        assert_eq!(rendition_names(240), vec!["360p"]);
     }
 }
 

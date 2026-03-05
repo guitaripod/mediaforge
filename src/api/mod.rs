@@ -175,7 +175,8 @@ async fn api_index() -> Json<serde_json::Value> {
             "streaming": {
                 "info": "/api/stream/{id}/info",
                 "hls_prepare": "/api/stream/{id}/hls/prepare",
-                "hls_playlist": "/api/stream/{id}/hls/playlist.m3u8",
+                "hls_master": "/api/stream/{id}/hls/master.m3u8",
+                "hls_variant": "/api/stream/{id}/hls/{variant}/playlist.m3u8",
                 "direct": "/api/stream/{id}/direct",
                 "subtitle": "/api/stream/{id}/subtitle/{sub_id}",
             },

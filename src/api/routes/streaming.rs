@@ -1,18 +1,13 @@
 use std::sync::{Arc, LazyLock};
 
 use axum::body::Body;
-use axum::extract::{Path, Query, State};
+use axum::extract::{Path, State};
 use axum::http::{header, HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Json, Response};
 use axum::routing::{get, post};
 use axum::Router;
 use regex::Regex;
 use serde::{Deserialize, Serialize};
-
-#[derive(Deserialize)]
-struct AudioTrackQuery {
-    audio_track: Option<i32>,
-}
 use tokio::io::AsyncSeekExt;
 use tokio_util::io::ReaderStream;
 use tracing::error;
@@ -27,13 +22,17 @@ use crate::hls::HlsStatus;
 static HLS_SEGMENT_RE: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"^segment_\d{4}\.ts$").unwrap());
 
+static HLS_VARIANT_RE: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"^(720p|360p|original)$").unwrap());
+
 pub fn routes() -> Router<Arc<AppState>> {
     Router::new()
         .route("/api/stream/{id}/info", get(stream_info))
         .route("/api/stream/{id}/hls/prepare", post(hls_prepare))
         .route("/api/stream/{id}/hls/status", get(hls_status))
-        .route("/api/stream/{id}/hls/playlist.m3u8", get(hls_playlist))
-        .route("/api/stream/{id}/hls/{segment}", get(hls_segment))
+        .route("/api/stream/{id}/hls/master.m3u8", get(hls_master))
+        .route("/api/stream/{id}/hls/{variant}/playlist.m3u8", get(hls_variant_playlist))
+        .route("/api/stream/{id}/hls/{variant}/{segment}", get(hls_segment))
         .route("/api/stream/{id}/direct", get(direct_stream))
         .route("/api/stream/{id}/subtitle/{sub_id}", get(serve_subtitle))
 }
@@ -142,15 +141,16 @@ async fn hls_prepare(
 ) -> AppResult<Response> {
     let conn = state.db.conn();
 
-    let item: Option<(String, Option<String>, Option<String>)> = conn
+    struct PrepareRow { file_path: String, video_codec: Option<String>, audio_codec: Option<String>, video_height: Option<i32> }
+    let item: Option<PrepareRow> = conn
         .query_row(
-            "SELECT file_path, video_codec, audio_codec FROM media_items WHERE id = ?1",
+            "SELECT file_path, video_codec, audio_codec, video_height FROM media_items WHERE id = ?1",
             [&id],
-            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            |row| Ok(PrepareRow { file_path: row.get(0)?, video_codec: row.get(1)?, audio_codec: row.get(2)?, video_height: row.get(3)? }),
         )
         .ok();
 
-    let Some((file_path, video_codec, mut audio_codec)) = item else {
+    let Some(PrepareRow { file_path, video_codec, mut audio_codec, video_height }) = item else {
         return Ok(
             (StatusCode::NOT_FOUND, Json(serde_json::json!({ "error": "Not found" })))
                 .into_response(),
@@ -194,6 +194,7 @@ async fn hls_prepare(
                 video_codec.as_deref(),
                 audio_codec.as_deref(),
                 audio_stream_index,
+                video_height,
             )
             .await
         {
@@ -204,20 +205,11 @@ async fn hls_prepare(
     Ok(Json(serde_json::json!({ "status": "preparing" })).into_response())
 }
 
-fn session_key(media_id: &str, audio_track: Option<i32>) -> String {
-    match audio_track {
-        Some(idx) => format!("{}_a{}", media_id, idx),
-        None => media_id.to_string(),
-    }
-}
-
 async fn hls_status(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
-    Query(q): Query<AudioTrackQuery>,
 ) -> AppResult<Json<serde_json::Value>> {
-    let key = session_key(&id, q.audio_track);
-    let status = state.hls.session_status(&key);
+    let status = state.hls.session_status(&id);
     let (status_str, error) = match status {
         Some(HlsStatus::Preparing) => ("preparing", None),
         Some(HlsStatus::Ready) => ("ready", None),
@@ -231,14 +223,32 @@ async fn hls_status(
     })))
 }
 
-async fn hls_playlist(
+async fn hls_master(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
-    Query(q): Query<AudioTrackQuery>,
 ) -> AppResult<Response> {
-    let key = session_key(&id, q.audio_track);
-    let Some(path) = state.hls.playlist_path(&key) else {
-        return Ok(StatusCode::NOT_FOUND.into_response());
+    let Some(path) = state.hls.master_playlist_path(&id) else {
+        return Ok((StatusCode::NOT_FOUND, Json(serde_json::json!({ "error": "Not found" }))).into_response());
+    };
+
+    let content = tokio::fs::read_to_string(&path).await?;
+    Ok((
+        [(header::CONTENT_TYPE, "application/vnd.apple.mpegurl")],
+        content,
+    )
+        .into_response())
+}
+
+async fn hls_variant_playlist(
+    State(state): State<Arc<AppState>>,
+    Path((id, variant)): Path<(String, String)>,
+) -> AppResult<Response> {
+    if !HLS_VARIANT_RE.is_match(&variant) {
+        return Ok(StatusCode::BAD_REQUEST.into_response());
+    }
+
+    let Some(path) = state.hls.variant_playlist_path(&id, &variant) else {
+        return Ok((StatusCode::NOT_FOUND, Json(serde_json::json!({ "error": "Not found" }))).into_response());
     };
 
     let content = tokio::fs::read_to_string(&path).await?;
@@ -251,16 +261,14 @@ async fn hls_playlist(
 
 async fn hls_segment(
     State(state): State<Arc<AppState>>,
-    Path((id, segment)): Path<(String, String)>,
-    Query(q): Query<AudioTrackQuery>,
+    Path((id, variant, segment)): Path<(String, String, String)>,
 ) -> AppResult<Response> {
-    if !HLS_SEGMENT_RE.is_match(&segment) {
+    if !HLS_VARIANT_RE.is_match(&variant) || !HLS_SEGMENT_RE.is_match(&segment) {
         return Ok(StatusCode::BAD_REQUEST.into_response());
     }
 
-    let key = session_key(&id, q.audio_track);
-    let Some(path) = state.hls.segment_path(&key, &segment) else {
-        return Ok(StatusCode::NOT_FOUND.into_response());
+    let Some(path) = state.hls.segment_path(&id, &variant, &segment) else {
+        return Ok((StatusCode::NOT_FOUND, Json(serde_json::json!({ "error": "Not found" }))).into_response());
     };
 
     let file = tokio::fs::File::open(&path).await?;
@@ -291,7 +299,7 @@ async fn direct_stream(
     };
 
     let Some((file_path, file_size)) = item else {
-        return Ok(StatusCode::NOT_FOUND.into_response());
+        return Ok((StatusCode::NOT_FOUND, Json(serde_json::json!({ "error": "Not found" }))).into_response());
     };
 
     let file_size = file_size as u64;
@@ -406,7 +414,7 @@ async fn serve_subtitle(
     };
 
     let Some(sub) = sub else {
-        return Ok(StatusCode::NOT_FOUND.into_response());
+        return Ok((StatusCode::NOT_FOUND, Json(serde_json::json!({ "error": "Not found" }))).into_response());
     };
 
     if sub.is_external
@@ -478,7 +486,7 @@ async fn serve_subtitle(
         return Ok(([(header::CONTENT_TYPE, "text/vtt")], content).into_response());
     }
 
-    Ok(StatusCode::NOT_FOUND.into_response())
+    Ok((StatusCode::NOT_FOUND, Json(serde_json::json!({ "error": "Not found" }))).into_response())
 }
 
 fn srt_to_vtt(srt: &str) -> String {
@@ -638,5 +646,20 @@ mod tests {
         assert!(!HLS_SEGMENT_RE.is_match("segment_00001.ts"));
         assert!(!HLS_SEGMENT_RE.is_match("other_0000.ts"));
         assert!(!HLS_SEGMENT_RE.is_match("segment_0000.mp4"));
+    }
+
+    #[test]
+    fn variant_valid_names() {
+        assert!(HLS_VARIANT_RE.is_match("720p"));
+        assert!(HLS_VARIANT_RE.is_match("360p"));
+        assert!(HLS_VARIANT_RE.is_match("original"));
+    }
+
+    #[test]
+    fn variant_rejects_invalid() {
+        assert!(!HLS_VARIANT_RE.is_match("1080p"));
+        assert!(!HLS_VARIANT_RE.is_match("../etc"));
+        assert!(!HLS_VARIANT_RE.is_match(""));
+        assert!(!HLS_VARIANT_RE.is_match("720p/../../etc"));
     }
 }
