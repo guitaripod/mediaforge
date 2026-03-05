@@ -1,5 +1,30 @@
 use serde::{Deserialize, Serialize};
 
+mod genres_as_vec {
+    use serde::{self, Deserialize, Deserializer, Serializer};
+
+    pub fn serialize<S>(value: &Option<String>, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        match value {
+            Some(s) if !s.is_empty() => {
+                let vec: Vec<&str> = s.split(',').map(|g| g.trim()).collect();
+                serializer.serialize_some(&vec)
+            }
+            _ => serializer.serialize_none(),
+        }
+    }
+
+    pub fn deserialize<'de, D>(deserializer: D) -> Result<Option<String>, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let opt: Option<String> = Option::deserialize(deserializer)?;
+        Ok(opt)
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MediaItem {
     pub id: String,
@@ -31,6 +56,7 @@ pub struct MediaItem {
     pub overview: Option<String>,
     pub poster_path: Option<String>,
     pub backdrop_path: Option<String>,
+    #[serde(with = "genres_as_vec")]
     pub genres: Option<String>,
     pub rating: Option<f64>,
     pub release_date: Option<String>,
@@ -95,6 +121,7 @@ pub struct TvShow {
     pub overview: Option<String>,
     pub poster_path: Option<String>,
     pub backdrop_path: Option<String>,
+    #[serde(with = "genres_as_vec")]
     pub genres: Option<String>,
     pub rating: Option<f64>,
     pub first_air_date: Option<String>,
