@@ -8,6 +8,7 @@ use axum::routing::{get, post};
 use axum::Router;
 use serde::{Deserialize, Serialize};
 use tokio::io::AsyncSeekExt;
+use tokio::sync::broadcast;
 use tokio_util::io::ReaderStream;
 use tracing::error;
 
@@ -875,7 +876,7 @@ pub fn metadata_routes() -> Router<Arc<AppState>> {
     Router::new()
         .route("/api/metadata/scan", post(trigger_scan))
         .route("/api/metadata/refresh", post(trigger_refresh))
-        .route("/api/metadata/poster/{*path}", get(proxy_poster))
+        .route("/api/metadata/image/{*path}", get(proxy_image))
 }
 
 async fn trigger_scan(State(state): State<Arc<AppState>>) -> AppResult<Json<serde_json::Value>> {
@@ -914,42 +915,116 @@ async fn trigger_refresh(
     Ok(Json(serde_json::json!({ "status": "refresh_started" })))
 }
 
-async fn proxy_poster(
+const VALID_IMAGE_SIZES: &[&str] = &[
+    "w92", "w154", "w185", "w342", "w500", "w780", "original",
+];
+
+#[derive(Deserialize)]
+struct ImageQuery {
+    #[serde(default = "default_image_size")]
+    size: String,
+}
+
+fn default_image_size() -> String {
+    "w500".to_string()
+}
+
+async fn proxy_image(
     State(state): State<Arc<AppState>>,
     Path(tmdb_path): Path<String>,
+    Query(query): Query<ImageQuery>,
 ) -> AppResult<Response> {
-    let cache_dir = state.config.transcoding.cache_dir.join("posters");
-    tokio::fs::create_dir_all(&cache_dir).await?;
-
-    let safe_name = tmdb_path.replace('/', "_");
-    let cache_path = cache_dir.join(&safe_name);
-
-    if cache_path.exists() {
-        let data = tokio::fs::read(&cache_path).await?;
-        let content_type = mime_guess::from_path(&tmdb_path)
-            .first_or_octet_stream()
-            .to_string();
-        return Ok(([(header::CONTENT_TYPE, content_type)], data).into_response());
+    if !VALID_IMAGE_SIZES.contains(&query.size.as_str()) {
+        return Ok((
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({ "error": "Invalid size", "valid": VALID_IMAGE_SIZES })),
+        )
+            .into_response());
     }
 
-    let url = TmdbClient::poster_url(&format!("/{}", tmdb_path), "w500");
-    let resp = reqwest::get(&url).await?;
+    let cache_dir = state.config.transcoding.cache_dir.join("images");
+    let size_dir = cache_dir.join(&query.size);
 
-    if !resp.status().is_success() {
+    let safe_name = tmdb_path.replace('/', "_");
+    let cache_path = size_dir.join(&safe_name);
+    let content_type = content_type_for_image(&tmdb_path);
+
+    if cache_path.exists() {
+        return serve_cached_image(&cache_path, content_type).await;
+    }
+
+    let cache_key = format!("{}/{}", query.size, safe_name);
+
+    if let Some(tx) = state.image_fetches.get(&cache_key) {
+        let mut rx = tx.subscribe();
+        drop(tx);
+        let _ = rx.recv().await;
+        if cache_path.exists() {
+            return serve_cached_image(&cache_path, content_type).await;
+        }
         return Ok(StatusCode::NOT_FOUND.into_response());
     }
 
-    let content_type = resp
-        .headers()
-        .get(header::CONTENT_TYPE)
-        .and_then(|v| v.to_str().ok())
-        .unwrap_or("image/jpeg")
-        .to_string();
+    let (tx, _) = broadcast::channel(1);
+    state.image_fetches.insert(cache_key.clone(), tx.clone());
+
+    let result = fetch_and_cache_image(&tmdb_path, &query.size, &size_dir, &cache_path).await;
+
+    let _ = tx.send(());
+    state.image_fetches.remove(&cache_key);
+
+    match result {
+        Ok(data) => Ok(image_response(content_type, Body::from(data))),
+        Err(_) => Ok(StatusCode::NOT_FOUND.into_response()),
+    }
+}
+
+async fn serve_cached_image(
+    cache_path: &std::path::Path,
+    content_type: &str,
+) -> AppResult<Response> {
+    let file = tokio::fs::File::open(cache_path).await?;
+    let stream = ReaderStream::new(file);
+    Ok(image_response(content_type, Body::from_stream(stream)))
+}
+
+fn image_response(content_type: &str, body: Body) -> Response {
+    Response::builder()
+        .status(StatusCode::OK)
+        .header(header::CONTENT_TYPE, content_type)
+        .header(header::CACHE_CONTROL, "public, max-age=604800, immutable")
+        .body(body)
+        .unwrap()
+}
+
+async fn fetch_and_cache_image(
+    tmdb_path: &str,
+    size: &str,
+    size_dir: &std::path::Path,
+    cache_path: &std::path::Path,
+) -> Result<Vec<u8>, anyhow::Error> {
+    let url = TmdbClient::poster_url(&format!("/{}", tmdb_path), size);
+    let resp = reqwest::get(&url).await?;
+
+    if !resp.status().is_success() {
+        anyhow::bail!("TMDB returned {}", resp.status());
+    }
 
     let data = resp.bytes().await?;
-    tokio::fs::write(&cache_path, &data).await?;
+    tokio::fs::create_dir_all(size_dir).await?;
+    tokio::fs::write(cache_path, &data).await?;
 
-    Ok(([(header::CONTENT_TYPE, content_type)], data.to_vec()).into_response())
+    Ok(data.to_vec())
+}
+
+fn content_type_for_image(path: &str) -> &'static str {
+    if path.ends_with(".png") {
+        "image/png"
+    } else if path.ends_with(".svg") {
+        "image/svg+xml"
+    } else {
+        "image/jpeg"
+    }
 }
 
 // ── System Routes ───────────────────────────────────────────────────────────

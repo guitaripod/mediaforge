@@ -11,14 +11,13 @@ use crate::ffmpeg::FFmpeg;
 use crate::hls::HlsManager;
 use crate::metadata::TmdbClient;
 
-/// Shared application state
-#[derive(Clone)]
 pub struct AppState {
     pub db: Database,
     pub ffmpeg: FFmpeg,
     pub hls: HlsManager,
     pub tmdb: TmdbClient,
     pub config: Config,
+    pub image_fetches: dashmap::DashMap<String, tokio::sync::broadcast::Sender<()>>,
 }
 
 pub fn create_router(state: AppState) -> Router {

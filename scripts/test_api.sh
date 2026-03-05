@@ -13,7 +13,7 @@ test_endpoint() {
     local label="$4"
     local body="${5:-}"
 
-    local curl_args=(-s -o /tmp/mf_test_body -w "%{http_code}" -X "$method")
+    local curl_args=(-s -o /tmp/mf_test_body -D /tmp/mf_test_headers -w "%{http_code}" -X "$method")
     if [[ -n "$body" ]]; then
         curl_args+=(-H "Content-Type: application/json" -d "$body")
     fi
@@ -534,7 +534,7 @@ else:
 " < /tmp/mf_test_body)
 if [[ -n "$POSTER" && "$POSTER" != "None" ]]; then
     POSTER_PATH="${POSTER#/}"
-    test_endpoint GET "/api/metadata/poster/${POSTER_PATH}" 200 "proxy poster (first fetch)"
+    test_endpoint GET "/api/metadata/image/${POSTER_PATH}" 200 "proxy image (first fetch)"
 
     POSTER_SIZE=$(wc -c < /tmp/mf_test_body)
     if [[ "$POSTER_SIZE" -gt 1000 ]]; then
@@ -546,9 +546,22 @@ if [[ -n "$POSTER" && "$POSTER" != "None" ]]; then
         printf "  FAIL  %-55s %s bytes\n" "poster size" "$POSTER_SIZE"
     fi
 
-    test_endpoint GET "/api/metadata/poster/${POSTER_PATH}" 200 "proxy poster (cached)"
+    test_endpoint GET "/api/metadata/image/${POSTER_PATH}" 200 "proxy image (cached)"
+
+    CACHE_CONTROL=$(grep -i 'cache-control' /tmp/mf_test_headers 2>/dev/null || true)
+    if echo "$CACHE_CONTROL" | grep -q "max-age=604800"; then
+        PASS=$((PASS + 1))
+        printf "  PASS  %-55s\n" "Cache-Control header present"
+    else
+        FAIL=$((FAIL + 1))
+        ERRORS="${ERRORS}\n  FAIL  Missing Cache-Control header"
+        printf "  FAIL  %-55s\n" "Cache-Control header"
+    fi
+
+    test_endpoint GET "/api/metadata/image/${POSTER_PATH}?size=w185" 200 "proxy image (w185 thumbnail)"
+    test_endpoint GET "/api/metadata/image/${POSTER_PATH}?size=invalid" 400 "proxy image (invalid size)"
 else
-    printf "  SKIP  %-55s (no poster available)\n" "proxy poster"
+    printf "  SKIP  %-55s (no poster available)\n" "proxy image"
 fi
 echo ""
 

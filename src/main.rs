@@ -106,6 +106,7 @@ async fn run_server(config: Config) -> anyhow::Result<()> {
         hls: hls.clone(),
         tmdb: tmdb.clone(),
         config: config.clone(),
+        image_fetches: dashmap::DashMap::new(),
     };
 
     let scan_db = db.clone();

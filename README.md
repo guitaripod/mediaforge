@@ -123,7 +123,7 @@ mediaforge -c /path/to/config.toml serve
 |--------|----------|-------------|
 | POST | `/api/metadata/scan` | Trigger library scan |
 | POST | `/api/metadata/refresh` | Trigger TMDB metadata refresh |
-| GET | `/api/metadata/poster/*path` | Proxy and cache TMDB poster |
+| GET | `/api/metadata/image/*path?size=w500` | Proxy and cache TMDB image (sizes: w92, w154, w185, w342, w500, w780, original) |
 
 ### System
 
