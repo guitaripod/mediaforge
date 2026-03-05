@@ -301,10 +301,7 @@ async fn next_episode(
         )
         .ok();
 
-    match next {
-        Some(ep) => Ok(Json(ep).into_response()),
-        None => Ok(Json(serde_json::json!({ "message": "All episodes watched" })).into_response()),
-    }
+    Ok(Json(next).into_response())
 }
 
 async fn get_episode(
