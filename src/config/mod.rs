@@ -8,6 +8,8 @@ pub struct Config {
     pub library: LibraryConfig,
     pub tmdb: TmdbConfig,
     pub transcoding: TranscodingConfig,
+    #[serde(default)]
+    pub cleanup: CleanupConfig,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -35,6 +37,27 @@ pub struct TranscodingConfig {
     pub cache_dir: PathBuf,
     pub hls_segment_duration: u32,
     pub max_concurrent_transcodes: usize,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CleanupConfig {
+    pub interval_secs: u64,
+    pub hls_max_age_secs: u64,
+    pub subtitle_max_age_secs: u64,
+    pub image_max_age_secs: u64,
+    pub activity_retention_days: u32,
+}
+
+impl Default for CleanupConfig {
+    fn default() -> Self {
+        Self {
+            interval_secs: 3600,
+            hls_max_age_secs: 86400,
+            subtitle_max_age_secs: 7 * 86400,
+            image_max_age_secs: 30 * 86400,
+            activity_retention_days: 90,
+        }
+    }
 }
 
 impl Default for Config {
@@ -66,6 +89,7 @@ impl Default for Config {
                 hls_segment_duration: 6,
                 max_concurrent_transcodes: 2,
             },
+            cleanup: CleanupConfig::default(),
         }
     }
 }
