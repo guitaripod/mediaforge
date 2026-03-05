@@ -14,6 +14,7 @@ Personal media server built in Rust. Scans your library, fetches metadata from T
 - **WebSocket** real-time scan progress (no polling needed)
 - **Subtitle support** (embedded extraction to WebVTT, external SRT/VTT serving)
 - **Smart codec detection** — copies compatible streams, only transcodes when necessary
+- **Automatic cache cleanup** — configurable expiry for HLS segments, subtitles, images, and activity logs
 - **Docker support** with multi-stage build
 
 <details>
@@ -69,6 +70,13 @@ ffprobe_path = "ffprobe"
 cache_dir = "/home/you/.cache/mediaforge"
 hls_segment_duration = 6
 max_concurrent_transcodes = 2
+
+[cleanup]
+interval_secs = 3600
+hls_max_age_secs = 86400
+subtitle_max_age_secs = 604800
+image_max_age_secs = 2592000
+activity_retention_days = 90
 ```
 
 ### Run
