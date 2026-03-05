@@ -1,5 +1,6 @@
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
+use tracing::warn;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Config {
@@ -71,15 +72,26 @@ impl Default for Config {
 
 impl Config {
     pub fn load(path: &Path) -> anyhow::Result<Self> {
-        if path.exists() {
+        let config = if path.exists() {
             let content = std::fs::read_to_string(path)?;
-            let config: Config = toml::from_str(&content)?;
-            Ok(config)
+            toml::from_str(&content)?
         } else {
             let config = Config::default();
             config.save(path)?;
-            Ok(config)
+            config
+        };
+
+        if config.tmdb.api_key.is_empty() {
+            warn!("No TMDB API key configured — metadata fetching will be disabled");
         }
+
+        for dir in &config.library.media_dirs {
+            if !dir.exists() {
+                warn!("Configured media directory does not exist: {}", dir.display());
+            }
+        }
+
+        Ok(config)
     }
 
     pub fn save(&self, path: &Path) -> anyhow::Result<()> {

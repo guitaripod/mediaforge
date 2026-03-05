@@ -100,7 +100,13 @@ impl Database {
 
             CREATE INDEX IF NOT EXISTS idx_media_type ON media_items(media_type);
             CREATE INDEX IF NOT EXISTS idx_show_name ON media_items(show_name);
+            CREATE INDEX IF NOT EXISTS idx_file_path ON media_items(file_path);
+            CREATE INDEX IF NOT EXISTS idx_tmdb_id ON media_items(tmdb_id);
+            CREATE INDEX IF NOT EXISTS idx_added_at ON media_items(added_at);
+            CREATE INDEX IF NOT EXISTS idx_sort_title ON media_items(sort_title);
             CREATE INDEX IF NOT EXISTS idx_subtitles_media ON subtitles(media_id);
+            CREATE INDEX IF NOT EXISTS idx_playback_continue ON playback_state(is_watched, position_secs)
+                WHERE is_watched = 0 AND position_secs > 0;
             ",
         )?;
         Ok(())
@@ -108,5 +114,174 @@ impl Database {
 
     pub fn conn(&self) -> r2d2::PooledConnection<SqliteConnectionManager> {
         self.pool.get().expect("failed to get db connection from pool")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tempfile::TempDir;
+
+    fn test_db() -> (Database, TempDir) {
+        let dir = TempDir::new().unwrap();
+        let db = Database::open(&dir.path().join("test.db")).unwrap();
+        (db, dir)
+    }
+
+    #[test]
+    fn creates_tables() {
+        let (db, _dir) = test_db();
+        let conn = db.conn();
+        let tables: Vec<String> = conn
+            .prepare("SELECT name FROM sqlite_master WHERE type='table' ORDER BY name")
+            .unwrap()
+            .query_map([], |row| row.get(0))
+            .unwrap()
+            .filter_map(|r| r.ok())
+            .collect();
+        assert!(tables.contains(&"media_items".to_string()));
+        assert!(tables.contains(&"subtitles".to_string()));
+        assert!(tables.contains(&"playback_state".to_string()));
+        assert!(tables.contains(&"tv_shows".to_string()));
+    }
+
+    #[test]
+    fn creates_indexes() {
+        let (db, _dir) = test_db();
+        let conn = db.conn();
+        let indexes: Vec<String> = conn
+            .prepare("SELECT name FROM sqlite_master WHERE type='index' AND name LIKE 'idx_%'")
+            .unwrap()
+            .query_map([], |row| row.get(0))
+            .unwrap()
+            .filter_map(|r| r.ok())
+            .collect();
+        assert!(indexes.contains(&"idx_file_path".to_string()));
+        assert!(indexes.contains(&"idx_sort_title".to_string()));
+        assert!(indexes.contains(&"idx_playback_continue".to_string()));
+    }
+
+    #[test]
+    fn wal_mode_enabled() {
+        let (db, _dir) = test_db();
+        let conn = db.conn();
+        let mode: String = conn
+            .query_row("PRAGMA journal_mode", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(mode, "wal");
+    }
+
+    #[test]
+    fn foreign_keys_enabled() {
+        let (db, _dir) = test_db();
+        let conn = db.conn();
+        let fk: i32 = conn
+            .query_row("PRAGMA foreign_keys", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(fk, 1);
+    }
+
+    #[test]
+    fn insert_and_query_media_item() {
+        let (db, _dir) = test_db();
+        let conn = db.conn();
+        conn.execute(
+            "INSERT INTO media_items (id, title, sort_title, media_type, file_path, file_size)
+             VALUES ('test1', 'Test Movie', 'test movie', 'movie', '/tmp/test.mkv', 1000)",
+            [],
+        ).unwrap();
+
+        let title: String = conn
+            .query_row("SELECT title FROM media_items WHERE id = 'test1'", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(title, "Test Movie");
+    }
+
+    #[test]
+    fn cascade_delete_subtitles() {
+        let (db, _dir) = test_db();
+        let conn = db.conn();
+        conn.execute(
+            "INSERT INTO media_items (id, title, sort_title, media_type, file_path, file_size)
+             VALUES ('m1', 'Movie', 'movie', 'movie', '/tmp/m.mkv', 100)",
+            [],
+        ).unwrap();
+        conn.execute(
+            "INSERT INTO subtitles (id, media_id, codec, is_external) VALUES ('s1', 'm1', 'srt', 1)",
+            [],
+        ).unwrap();
+        conn.execute("DELETE FROM media_items WHERE id = 'm1'", []).unwrap();
+
+        let count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM subtitles WHERE media_id = 'm1'", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(count, 0);
+    }
+
+    #[test]
+    fn cascade_delete_playback() {
+        let (db, _dir) = test_db();
+        let conn = db.conn();
+        conn.execute(
+            "INSERT INTO media_items (id, title, sort_title, media_type, file_path, file_size)
+             VALUES ('m1', 'Movie', 'movie', 'movie', '/tmp/m.mkv', 100)",
+            [],
+        ).unwrap();
+        conn.execute(
+            "INSERT INTO playback_state (media_id, position_secs) VALUES ('m1', 60.0)",
+            [],
+        ).unwrap();
+        conn.execute("DELETE FROM media_items WHERE id = 'm1'", []).unwrap();
+
+        let count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM playback_state WHERE media_id = 'm1'", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(count, 0);
+    }
+
+    #[test]
+    fn playback_upsert() {
+        let (db, _dir) = test_db();
+        let conn = db.conn();
+        conn.execute(
+            "INSERT INTO media_items (id, title, sort_title, media_type, file_path, file_size)
+             VALUES ('m1', 'Movie', 'movie', 'movie', '/tmp/m.mkv', 100)",
+            [],
+        ).unwrap();
+
+        conn.execute(
+            "INSERT INTO playback_state (media_id, position_secs, last_played_at)
+             VALUES ('m1', 30.0, datetime('now'))
+             ON CONFLICT(media_id) DO UPDATE SET position_secs = 30.0",
+            [],
+        ).unwrap();
+
+        conn.execute(
+            "INSERT INTO playback_state (media_id, position_secs, last_played_at)
+             VALUES ('m1', 90.0, datetime('now'))
+             ON CONFLICT(media_id) DO UPDATE SET position_secs = 90.0",
+            [],
+        ).unwrap();
+
+        let pos: f64 = conn
+            .query_row("SELECT position_secs FROM playback_state WHERE media_id = 'm1'", [], |row| row.get(0))
+            .unwrap();
+        assert!((pos - 90.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn multiple_connections() {
+        let (db, _dir) = test_db();
+        let c1 = db.conn();
+        let c2 = db.conn();
+        c1.execute(
+            "INSERT INTO media_items (id, title, sort_title, media_type, file_path, file_size)
+             VALUES ('m1', 'Movie', 'movie', 'movie', '/tmp/m.mkv', 100)",
+            [],
+        ).unwrap();
+        let count: i64 = c2
+            .query_row("SELECT COUNT(*) FROM media_items", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(count, 1);
     }
 }

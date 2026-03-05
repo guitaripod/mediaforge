@@ -1,0 +1,587 @@
+use std::sync::{Arc, LazyLock};
+
+use axum::body::Body;
+use axum::extract::{Path, State};
+use axum::http::{header, HeaderMap, StatusCode};
+use axum::response::{IntoResponse, Json, Response};
+use axum::routing::{get, post};
+use axum::Router;
+use regex::Regex;
+use serde::Serialize;
+use tokio::io::AsyncSeekExt;
+use tokio_util::io::ReaderStream;
+use tracing::error;
+
+use crate::api::error::AppResult;
+use crate::api::helpers::get_subtitles_for_media;
+use crate::api::AppState;
+use crate::db::models::Subtitle;
+use crate::ffmpeg::FFmpeg;
+use crate::hls::HlsStatus;
+
+static HLS_SEGMENT_RE: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"^segment_\d{4}\.ts$").unwrap());
+
+pub fn routes() -> Router<Arc<AppState>> {
+    Router::new()
+        .route("/api/stream/{id}/info", get(stream_info))
+        .route("/api/stream/{id}/hls/prepare", post(hls_prepare))
+        .route("/api/stream/{id}/hls/status", get(hls_status))
+        .route("/api/stream/{id}/hls/playlist.m3u8", get(hls_playlist))
+        .route("/api/stream/{id}/hls/{segment}", get(hls_segment))
+        .route("/api/stream/{id}/direct", get(direct_stream))
+        .route("/api/stream/{id}/subtitle/{sub_id}", get(serve_subtitle))
+}
+
+#[derive(Serialize)]
+struct StreamInfo {
+    id: String,
+    video_codec: Option<String>,
+    audio_codec: Option<String>,
+    video_width: Option<i32>,
+    video_height: Option<i32>,
+    hdr_format: Option<String>,
+    duration_secs: Option<f64>,
+    file_size: i64,
+    needs_transcode: bool,
+    can_direct_play: bool,
+    subtitles: Vec<Subtitle>,
+}
+
+struct StreamInfoRow {
+    id: String,
+    video_codec: Option<String>,
+    audio_codec: Option<String>,
+    video_width: Option<i32>,
+    video_height: Option<i32>,
+    hdr_format: Option<String>,
+    duration_secs: Option<f64>,
+    file_size: i64,
+    file_path: String,
+}
+
+async fn stream_info(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> AppResult<Response> {
+    let conn = state.db.conn();
+
+    let item: Option<StreamInfoRow> = conn
+        .query_row(
+            "SELECT id, video_codec, audio_codec, video_width, video_height, hdr_format, duration_secs, file_size, file_path
+             FROM media_items WHERE id = ?1",
+            [&id],
+            |row| {
+                Ok(StreamInfoRow {
+                    id: row.get(0)?,
+                    video_codec: row.get(1)?,
+                    audio_codec: row.get(2)?,
+                    video_width: row.get(3)?,
+                    video_height: row.get(4)?,
+                    hdr_format: row.get(5)?,
+                    duration_secs: row.get(6)?,
+                    file_size: row.get(7)?,
+                    file_path: row.get(8)?,
+                })
+            },
+        )
+        .ok();
+
+    let Some(item) = item else {
+        return Ok(
+            (StatusCode::NOT_FOUND, Json(serde_json::json!({ "error": "Not found" })))
+                .into_response(),
+        );
+    };
+
+    let can_direct = item.video_codec.as_deref().map(FFmpeg::is_ios_native_video).unwrap_or(false)
+        && !item.audio_codec.as_deref().map(FFmpeg::needs_audio_transcode).unwrap_or(true)
+        && item.file_path.ends_with(".mp4");
+
+    let needs_transcode = item
+        .video_codec
+        .as_deref()
+        .map(|c| !FFmpeg::is_ios_native_video(c))
+        .unwrap_or(true);
+
+    let subtitles = get_subtitles_for_media(&conn, &id)?;
+
+    Ok(Json(StreamInfo {
+        id: item.id,
+        video_codec: item.video_codec,
+        audio_codec: item.audio_codec,
+        video_width: item.video_width,
+        video_height: item.video_height,
+        hdr_format: item.hdr_format,
+        duration_secs: item.duration_secs,
+        file_size: item.file_size,
+        needs_transcode,
+        can_direct_play: can_direct,
+        subtitles,
+    })
+    .into_response())
+}
+
+async fn hls_prepare(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> AppResult<Response> {
+    let conn = state.db.conn();
+
+    let item: Option<(String, Option<String>, Option<String>)> = conn
+        .query_row(
+            "SELECT file_path, video_codec, audio_codec FROM media_items WHERE id = ?1",
+            [&id],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .ok();
+
+    let Some((file_path, video_codec, audio_codec)) = item else {
+        return Ok(
+            (StatusCode::NOT_FOUND, Json(serde_json::json!({ "error": "Not found" })))
+                .into_response(),
+        );
+    };
+
+    let hls = state.hls.clone();
+    let media_id = id.clone();
+    tokio::spawn(async move {
+        if let Err(e) = hls
+            .prepare_stream(
+                &media_id,
+                &file_path,
+                video_codec.as_deref(),
+                audio_codec.as_deref(),
+            )
+            .await
+        {
+            error!("HLS preparation failed for {}: {}", media_id, e);
+        }
+    });
+
+    Ok(Json(serde_json::json!({ "status": "preparing" })).into_response())
+}
+
+async fn hls_status(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> AppResult<Json<serde_json::Value>> {
+    let status = state.hls.session_status(&id);
+    let (status_str, error) = match status {
+        Some(HlsStatus::Preparing) => ("preparing", None),
+        Some(HlsStatus::Ready) => ("ready", None),
+        Some(HlsStatus::Error(e)) => ("error", Some(e)),
+        None => ("not_found", None),
+    };
+
+    Ok(Json(serde_json::json!({
+        "status": status_str,
+        "error": error,
+    })))
+}
+
+async fn hls_playlist(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> AppResult<Response> {
+    let Some(path) = state.hls.playlist_path(&id) else {
+        return Ok(StatusCode::NOT_FOUND.into_response());
+    };
+
+    let content = tokio::fs::read_to_string(&path).await?;
+    Ok((
+        [(header::CONTENT_TYPE, "application/vnd.apple.mpegurl")],
+        content,
+    )
+        .into_response())
+}
+
+async fn hls_segment(
+    State(state): State<Arc<AppState>>,
+    Path((id, segment)): Path<(String, String)>,
+) -> AppResult<Response> {
+    if !HLS_SEGMENT_RE.is_match(&segment) {
+        return Ok(StatusCode::BAD_REQUEST.into_response());
+    }
+
+    let Some(path) = state.hls.segment_path(&id, &segment) else {
+        return Ok(StatusCode::NOT_FOUND.into_response());
+    };
+
+    let file = tokio::fs::File::open(&path).await?;
+    let metadata = file.metadata().await?;
+    let stream = ReaderStream::new(file);
+
+    Ok(Response::builder()
+        .status(StatusCode::OK)
+        .header(header::CONTENT_TYPE, "video/mp2t")
+        .header(header::CONTENT_LENGTH, metadata.len())
+        .body(Body::from_stream(stream))
+        .unwrap())
+}
+
+async fn direct_stream(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+    headers: HeaderMap,
+) -> AppResult<Response> {
+    let item: Option<(String, i64)> = {
+        let conn = state.db.conn();
+        conn.query_row(
+            "SELECT file_path, file_size FROM media_items WHERE id = ?1",
+            [&id],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .ok()
+    };
+
+    let Some((file_path, file_size)) = item else {
+        return Ok(StatusCode::NOT_FOUND.into_response());
+    };
+
+    let file_size = file_size as u64;
+    let content_type = mime_guess::from_path(&file_path)
+        .first_or_octet_stream()
+        .to_string();
+
+    let range_header = headers
+        .get(header::RANGE)
+        .and_then(|v| v.to_str().ok());
+
+    if let Some(range_str) = range_header {
+        let (start, end) = match parse_range(range_str, file_size) {
+            Ok(r) => r,
+            Err(status) => return Ok(status.into_response()),
+        };
+        let content_length = end - start + 1;
+
+        let mut file = tokio::fs::File::open(&file_path).await?;
+        file.seek(std::io::SeekFrom::Start(start)).await?;
+        let reader = tokio::io::AsyncReadExt::take(file, content_length);
+        let stream = ReaderStream::new(reader);
+
+        Ok(Response::builder()
+            .status(StatusCode::PARTIAL_CONTENT)
+            .header(header::CONTENT_TYPE, &content_type)
+            .header(header::CONTENT_LENGTH, content_length)
+            .header(header::ACCEPT_RANGES, "bytes")
+            .header(
+                header::CONTENT_RANGE,
+                format!("bytes {}-{}/{}", start, end, file_size),
+            )
+            .body(Body::from_stream(stream))
+            .unwrap())
+    } else {
+        let file = tokio::fs::File::open(&file_path).await?;
+        let stream = ReaderStream::new(file);
+
+        Ok(Response::builder()
+            .status(StatusCode::OK)
+            .header(header::CONTENT_TYPE, &content_type)
+            .header(header::CONTENT_LENGTH, file_size)
+            .header(header::ACCEPT_RANGES, "bytes")
+            .body(Body::from_stream(stream))
+            .unwrap())
+    }
+}
+
+fn parse_range(range: &str, file_size: u64) -> Result<(u64, u64), StatusCode> {
+    let range = range
+        .strip_prefix("bytes=")
+        .ok_or(StatusCode::RANGE_NOT_SATISFIABLE)?;
+
+    let parts: Vec<&str> = range.split('-').collect();
+    if parts.len() != 2 {
+        return Err(StatusCode::RANGE_NOT_SATISFIABLE);
+    }
+
+    let (start, end) = if parts[0].is_empty() {
+        let suffix: u64 = parts[1]
+            .parse()
+            .map_err(|_| StatusCode::RANGE_NOT_SATISFIABLE)?;
+        (file_size.saturating_sub(suffix), file_size - 1)
+    } else {
+        let s: u64 = parts[0]
+            .parse()
+            .map_err(|_| StatusCode::RANGE_NOT_SATISFIABLE)?;
+        let e: u64 = if parts[1].is_empty() {
+            file_size - 1
+        } else {
+            parts[1]
+                .parse()
+                .map_err(|_| StatusCode::RANGE_NOT_SATISFIABLE)?
+        };
+        (s, e)
+    };
+
+    let end = end.min(file_size - 1);
+
+    if start > end || start >= file_size {
+        return Err(StatusCode::RANGE_NOT_SATISFIABLE);
+    }
+
+    Ok((start, end))
+}
+
+async fn serve_subtitle(
+    State(state): State<Arc<AppState>>,
+    Path((id, sub_id)): Path<(String, String)>,
+) -> AppResult<Response> {
+    let sub: Option<Subtitle> = {
+        let conn = state.db.conn();
+        conn.query_row(
+            "SELECT id, media_id, file_path, stream_index, language, codec, is_forced, is_default, is_external
+             FROM subtitles WHERE id = ?1 AND media_id = ?2",
+            rusqlite::params![sub_id, id],
+            |row| {
+                Ok(Subtitle {
+                    id: row.get(0)?,
+                    media_id: row.get(1)?,
+                    file_path: row.get(2)?,
+                    stream_index: row.get(3)?,
+                    language: row.get(4)?,
+                    codec: row.get(5)?,
+                    is_forced: row.get::<_, i32>(6)? != 0,
+                    is_default: row.get::<_, i32>(7)? != 0,
+                    is_external: row.get::<_, i32>(8)? != 0,
+                })
+            },
+        )
+        .ok()
+    };
+
+    let Some(sub) = sub else {
+        return Ok(StatusCode::NOT_FOUND.into_response());
+    };
+
+    if sub.is_external
+        && let Some(ref path) = sub.file_path
+    {
+        let ext = std::path::Path::new(path)
+            .extension()
+            .and_then(|e| e.to_str())
+            .unwrap_or("");
+
+        if ext == "vtt" {
+            let content = tokio::fs::read_to_string(path).await?;
+            return Ok(([(header::CONTENT_TYPE, "text/vtt")], content).into_response());
+        }
+
+        if ext == "srt" {
+            let content = tokio::fs::read_to_string(path).await?;
+            let vtt = srt_to_vtt(&content);
+            return Ok(([(header::CONTENT_TYPE, "text/vtt")], vtt).into_response());
+        }
+
+        let content = tokio::fs::read_to_string(path).await?;
+        return Ok(([(header::CONTENT_TYPE, "text/plain")], content).into_response());
+    }
+
+    if let Some(stream_index) = sub.stream_index {
+        let codec = sub.codec.as_deref().unwrap_or("");
+        if matches!(codec, "dvd_subtitle" | "hdmv_pgs_subtitle" | "pgssub" | "vobsub" | "dvb_subtitle") {
+            return Ok((
+                StatusCode::UNPROCESSABLE_ENTITY,
+                Json(serde_json::json!({ "error": "Bitmap-based subtitles cannot be converted to text" })),
+            ).into_response());
+        }
+
+        let media_path: String = {
+            let conn = state.db.conn();
+            conn.query_row(
+                "SELECT file_path FROM media_items WHERE id = ?1",
+                [&id],
+                |row| row.get(0),
+            )?
+        };
+
+        let subs_dir = state.config.transcoding.cache_dir.join("subs");
+        let vtt_path = subs_dir.join(format!("{}_{}.vtt", id, sub_id));
+
+        if !vtt_path.exists() {
+            let tmp_path = subs_dir.join(format!("{}_{}.vtt.tmp", id, sub_id));
+            match state
+                .ffmpeg
+                .extract_subtitle_vtt(
+                    std::path::Path::new(&media_path),
+                    stream_index,
+                    &tmp_path,
+                )
+                .await
+            {
+                Ok(()) => {
+                    tokio::fs::rename(&tmp_path, &vtt_path).await?;
+                }
+                Err(e) => {
+                    let _ = tokio::fs::remove_file(&tmp_path).await;
+                    return Err(e.into());
+                }
+            }
+        }
+
+        let content = tokio::fs::read_to_string(&vtt_path).await?;
+        return Ok(([(header::CONTENT_TYPE, "text/vtt")], content).into_response());
+    }
+
+    Ok(StatusCode::NOT_FOUND.into_response())
+}
+
+fn srt_to_vtt(srt: &str) -> String {
+    let mut vtt = String::from("WEBVTT\n\n");
+    for line in srt.lines() {
+        if line.contains(" --> ") {
+            vtt.push_str(&line.replace(',', "."));
+        } else {
+            vtt.push_str(line);
+        }
+        vtt.push('\n');
+    }
+    vtt
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn range_standard() {
+        let (start, end) = parse_range("bytes=0-999", 10000).unwrap();
+        assert_eq!(start, 0);
+        assert_eq!(end, 999);
+    }
+
+    #[test]
+    fn range_open_ended() {
+        let (start, end) = parse_range("bytes=5000-", 10000).unwrap();
+        assert_eq!(start, 5000);
+        assert_eq!(end, 9999);
+    }
+
+    #[test]
+    fn range_suffix() {
+        let (start, end) = parse_range("bytes=-500", 10000).unwrap();
+        assert_eq!(start, 9500);
+        assert_eq!(end, 9999);
+    }
+
+    #[test]
+    fn range_suffix_larger_than_file() {
+        let (start, end) = parse_range("bytes=-50000", 10000).unwrap();
+        assert_eq!(start, 0);
+        assert_eq!(end, 9999);
+    }
+
+    #[test]
+    fn range_end_clamped_to_file_size() {
+        let (start, end) = parse_range("bytes=0-99999", 10000).unwrap();
+        assert_eq!(start, 0);
+        assert_eq!(end, 9999);
+    }
+
+    #[test]
+    fn range_single_byte() {
+        let (start, end) = parse_range("bytes=0-0", 10000).unwrap();
+        assert_eq!(start, 0);
+        assert_eq!(end, 0);
+    }
+
+    #[test]
+    fn range_last_byte() {
+        let (start, end) = parse_range("bytes=9999-9999", 10000).unwrap();
+        assert_eq!(start, 9999);
+        assert_eq!(end, 9999);
+    }
+
+    #[test]
+    fn range_past_eof_fails() {
+        assert_eq!(
+            parse_range("bytes=10000-10000", 10000).unwrap_err(),
+            StatusCode::RANGE_NOT_SATISFIABLE
+        );
+    }
+
+    #[test]
+    fn range_start_greater_than_end_fails() {
+        assert_eq!(
+            parse_range("bytes=500-100", 10000).unwrap_err(),
+            StatusCode::RANGE_NOT_SATISFIABLE
+        );
+    }
+
+    #[test]
+    fn range_missing_prefix_fails() {
+        assert_eq!(
+            parse_range("0-999", 10000).unwrap_err(),
+            StatusCode::RANGE_NOT_SATISFIABLE
+        );
+    }
+
+    #[test]
+    fn range_garbage_fails() {
+        assert_eq!(
+            parse_range("bytes=abc-def", 10000).unwrap_err(),
+            StatusCode::RANGE_NOT_SATISFIABLE
+        );
+    }
+
+    #[test]
+    fn srt_to_vtt_basic() {
+        let srt = "1\n00:00:01,000 --> 00:00:02,500\nHello world\n";
+        let vtt = srt_to_vtt(srt);
+        assert!(vtt.starts_with("WEBVTT"));
+        assert!(vtt.contains("00:00:01.000 --> 00:00:02.500"));
+        assert!(vtt.contains("Hello world"));
+    }
+
+    #[test]
+    fn srt_to_vtt_preserves_text() {
+        let srt = "1\n00:00:00,000 --> 00:00:01,000\nLine one\nLine two\n";
+        let vtt = srt_to_vtt(srt);
+        assert!(vtt.contains("Line one"));
+        assert!(vtt.contains("Line two"));
+    }
+
+    #[test]
+    fn srt_to_vtt_replaces_all_commas_in_timestamps() {
+        let srt = "1\n00:01:23,456 --> 00:04:56,789\nText\n";
+        let vtt = srt_to_vtt(srt);
+        assert!(vtt.contains("00:01:23.456 --> 00:04:56.789"));
+    }
+
+    #[test]
+    fn srt_to_vtt_preserves_commas_in_dialogue() {
+        let srt = "1\n00:00:00,000 --> 00:00:01,000\nHello, world\n";
+        let vtt = srt_to_vtt(srt);
+        assert!(vtt.contains("Hello, world"));
+        assert!(vtt.contains("00:00:00.000 --> 00:00:01.000"));
+    }
+
+    #[test]
+    fn srt_to_vtt_empty_input() {
+        let vtt = srt_to_vtt("");
+        assert!(vtt.starts_with("WEBVTT"));
+    }
+
+    #[test]
+    fn segment_valid_names() {
+        assert!(HLS_SEGMENT_RE.is_match("segment_0000.ts"));
+        assert!(HLS_SEGMENT_RE.is_match("segment_0042.ts"));
+        assert!(HLS_SEGMENT_RE.is_match("segment_9999.ts"));
+    }
+
+    #[test]
+    fn segment_rejects_traversal() {
+        assert!(!HLS_SEGMENT_RE.is_match("../etc/passwd"));
+        assert!(!HLS_SEGMENT_RE.is_match("segment_0001.ts/../../etc/passwd"));
+        assert!(!HLS_SEGMENT_RE.is_match("..\\segment_0001.ts"));
+    }
+
+    #[test]
+    fn segment_rejects_wrong_format() {
+        assert!(!HLS_SEGMENT_RE.is_match("playlist.m3u8"));
+        assert!(!HLS_SEGMENT_RE.is_match("segment_01.ts"));
+        assert!(!HLS_SEGMENT_RE.is_match("segment_00001.ts"));
+        assert!(!HLS_SEGMENT_RE.is_match("other_0000.ts"));
+        assert!(!HLS_SEGMENT_RE.is_match("segment_0000.mp4"));
+    }
+}

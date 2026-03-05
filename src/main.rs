@@ -7,6 +7,7 @@ mod metadata;
 mod scanner;
 
 use std::path::PathBuf;
+use std::sync::Arc;
 use std::time::Duration;
 
 use clap::{Parser, Subcommand};
@@ -15,7 +16,7 @@ use tokio::signal;
 use tracing::{error, info};
 use tracing_subscriber::EnvFilter;
 
-use api::AppState;
+use api::{AppState, ScanStatus};
 use config::Config;
 use db::Database;
 use ffmpeg::FFmpeg;
@@ -100,6 +101,8 @@ async fn run_server(config: Config) -> anyhow::Result<()> {
         config.tmdb.language.clone(),
     );
 
+    let scan_status = Arc::new(ScanStatus::new());
+
     let state = AppState {
         db: db.clone(),
         ffmpeg: ffmpeg.clone(),
@@ -107,29 +110,25 @@ async fn run_server(config: Config) -> anyhow::Result<()> {
         tmdb: tmdb.clone(),
         config: config.clone(),
         image_fetches: dashmap::DashMap::new(),
+        scan_status: scan_status.clone(),
     };
 
     let scan_db = db.clone();
     let scan_ffmpeg = ffmpeg.clone();
+    let scan_tmdb = tmdb.clone();
     let scan_dirs = config.library.media_dirs.clone();
     let scan_interval = config.library.scan_interval_secs;
+    let scan_status_bg = scan_status.clone();
     tokio::spawn(async move {
         if !scan_dirs.is_empty() {
-            let scanner = Scanner::new(scan_db.clone(), scan_ffmpeg.clone());
-            info!("Running initial library scan...");
-            if let Err(e) = scanner.scan_directories(&scan_dirs).await {
-                error!("Initial scan failed: {}", e);
-            }
+            scan_and_fetch_metadata(&scan_db, &scan_ffmpeg, &scan_tmdb, &scan_dirs, &scan_status_bg).await;
 
             let mut interval = tokio::time::interval(Duration::from_secs(scan_interval));
             interval.tick().await;
             loop {
                 interval.tick().await;
                 info!("Running periodic library scan...");
-                let scanner = Scanner::new(scan_db.clone(), scan_ffmpeg.clone());
-                if let Err(e) = scanner.scan_directories(&scan_dirs).await {
-                    error!("Periodic scan failed: {}", e);
-                }
+                scan_and_fetch_metadata(&scan_db, &scan_ffmpeg, &scan_tmdb, &scan_dirs, &scan_status_bg).await;
             }
         }
     });
@@ -183,6 +182,45 @@ async fn run_scan(config: Config) -> anyhow::Result<()> {
 
     info!("Scan complete");
     Ok(())
+}
+
+async fn scan_and_fetch_metadata(
+    db: &Database,
+    ffmpeg: &FFmpeg,
+    tmdb: &TmdbClient,
+    dirs: &[PathBuf],
+    status: &ScanStatus,
+) {
+    status.start_scan();
+
+    let scanner = Scanner::new(db.clone(), ffmpeg.clone());
+    info!("Running library scan...");
+    match scanner.scan_directories(dirs).await {
+        Ok(count) => {
+            status.set_items_found(count);
+        }
+        Err(e) => {
+            error!("Library scan failed: {}", e);
+            status.fail(e.to_string());
+            return;
+        }
+    }
+
+    if tmdb.has_key() {
+        status.start_metadata();
+        info!("Fetching metadata for new items...");
+        if let Err(e) = tmdb.migrate_numeric_genres(db).await {
+            error!("Genre migration failed: {}", e);
+        }
+        if let Err(e) = tmdb.update_movie_metadata(db).await {
+            error!("Movie metadata refresh failed: {}", e);
+        }
+        if let Err(e) = tmdb.update_tv_metadata(db).await {
+            error!("TV metadata refresh failed: {}", e);
+        }
+    }
+
+    status.finish();
 }
 
 async fn shutdown_signal() {

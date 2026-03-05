@@ -44,9 +44,9 @@ struct SideData {
 }
 
 #[derive(Debug, Deserialize)]
-#[allow(dead_code)]
 struct FfprobeFormat {
     duration: Option<String>,
+    #[allow(dead_code)]
     bit_rate: Option<String>,
 }
 
@@ -157,13 +157,13 @@ impl FFmpeg {
         Ok(result)
     }
 
-    /// Generate HLS playlist and segments for a media file
     pub async fn generate_hls(
         &self,
         input_path: &Path,
         output_dir: &Path,
         segment_duration: u32,
         start_time: Option<f64>,
+        transcode_audio: bool,
     ) -> Result<()> {
         std::fs::create_dir_all(output_dir)?;
 
@@ -178,25 +178,15 @@ impl FFmpeg {
         }
 
         cmd.arg("-i").arg(input_path);
+        cmd.args(["-map", "0:v:0", "-map", "0:a:0", "-c:v", "copy"]);
 
-        // Video: copy if h264/h265, transcode otherwise
-        // Audio: transcode to AAC for iOS compatibility
+        if transcode_audio {
+            cmd.args(["-c:a", "aac", "-b:a", "192k", "-ac", "2"]);
+        } else {
+            cmd.args(["-c:a", "copy"]);
+        }
+
         cmd.args([
-            "-map",
-            "0:v:0",
-            "-map",
-            "0:a:0",
-            // Video settings - will be overridden per-file
-            "-c:v",
-            "copy",
-            // Audio: always AAC for iOS
-            "-c:a",
-            "aac",
-            "-b:a",
-            "192k",
-            "-ac",
-            "2",
-            // HLS settings
             "-f",
             "hls",
             "-hls_time",
@@ -281,37 +271,6 @@ impl FFmpeg {
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
             anyhow::bail!("FFmpeg HLS transcode failed: {}", stderr);
-        }
-
-        Ok(())
-    }
-
-    #[allow(dead_code)]
-    pub async fn remux_to_mp4(&self, input_path: &Path, output_path: &Path) -> Result<()> {
-        if let Some(parent) = output_path.parent() {
-            std::fs::create_dir_all(parent)?;
-        }
-
-        let output = Command::new(&self.ffmpeg_path)
-            .args([
-                "-y",
-                "-hide_banner",
-                "-loglevel",
-                "warning",
-                "-i",
-            ])
-            .arg(input_path)
-            .args(["-c", "copy", "-movflags", "+faststart"])
-            .arg(output_path)
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .output()
-            .await
-            .context("Failed to run ffmpeg for remux")?;
-
-        if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            anyhow::bail!("FFmpeg remux failed: {}", stderr);
         }
 
         Ok(())

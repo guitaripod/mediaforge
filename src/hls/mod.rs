@@ -20,11 +20,12 @@ pub struct HlsManager {
 }
 
 #[derive(Debug, Clone)]
-#[allow(dead_code)]
 pub struct HlsSession {
+    #[allow(dead_code)]
     pub media_id: String,
     pub output_dir: PathBuf,
     pub playlist_path: PathBuf,
+    #[allow(dead_code)]
     pub needs_transcode: bool,
     pub status: HlsStatus,
 }
@@ -93,7 +94,7 @@ impl HlsManager {
             .map(FFmpeg::needs_audio_transcode)
             .unwrap_or(true);
 
-        let needs_transcode = needs_video_transcode;
+        let needs_transcode = needs_video_transcode || needs_audio_transcode;
 
         // Set status to preparing
         let session = HlsSession {
@@ -122,7 +123,7 @@ impl HlsManager {
                 .await
         } else {
             self.ffmpeg
-                .generate_hls(input_path, &output_dir, self.segment_duration, None)
+                .generate_hls(input_path, &output_dir, self.segment_duration, None, needs_audio_transcode)
                 .await
         };
 

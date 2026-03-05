@@ -1,5 +1,6 @@
 use anyhow::Result;
 use regex::Regex;
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::LazyLock;
 use tracing::{debug, info, warn};
@@ -46,17 +47,18 @@ impl Scanner {
         Self { db, ffmpeg }
     }
 
-    pub async fn scan_directories(&self, dirs: &[PathBuf]) -> Result<()> {
+    pub async fn scan_directories(&self, dirs: &[PathBuf]) -> Result<u32> {
+        let mut total_new = 0u32;
         for dir in dirs {
             if !dir.exists() {
                 warn!("Media directory does not exist: {:?}", dir);
                 continue;
             }
             info!("Scanning directory: {:?}", dir);
-            self.scan_directory(dir).await?;
+            total_new += self.scan_directory(dir).await?;
         }
         self.prune_stale_entries()?;
-        Ok(())
+        Ok(total_new)
     }
 
     fn prune_stale_entries(&self) -> Result<()> {
@@ -89,7 +91,7 @@ impl Scanner {
         Ok(())
     }
 
-    async fn scan_directory(&self, dir: &Path) -> Result<()> {
+    async fn scan_directory(&self, dir: &Path) -> Result<u32> {
         let mut video_files: Vec<PathBuf> = Vec::new();
         let mut subtitle_files: Vec<PathBuf> = Vec::new();
 
@@ -119,31 +121,32 @@ impl Scanner {
             subtitle_files.len()
         );
 
+        let existing_paths: HashSet<String> = {
+            let conn = self.db.conn();
+            let mut stmt = conn.prepare("SELECT file_path FROM media_items")?;
+            stmt.query_map([], |row| row.get::<_, String>(0))?
+                .filter_map(|r| r.ok())
+                .collect()
+        };
+
+        let mut new_count = 0u32;
         for video_path in &video_files {
-            {
-                let conn = self.db.conn();
-                let path_str = video_path.to_string_lossy();
-                let exists: bool = conn
-                    .query_row(
-                        "SELECT COUNT(*) FROM media_items WHERE file_path = ?1",
-                        [path_str.as_ref()],
-                        |row| row.get::<_, i64>(0),
-                    )
-                    .unwrap_or(0)
-                    > 0;
-                if exists {
-                    debug!("Skipping already indexed: {:?}", video_path);
-                    continue;
-                }
+            let path_str = video_path.to_string_lossy();
+            if existing_paths.contains(path_str.as_ref()) {
+                debug!("Skipping already indexed: {:?}", video_path);
+                continue;
             }
 
             match self.index_video(video_path, &subtitle_files).await {
-                Ok(_) => debug!("Indexed: {:?}", video_path),
+                Ok(_) => {
+                    new_count += 1;
+                    debug!("Indexed: {:?}", video_path);
+                }
                 Err(e) => warn!("Failed to index {:?}: {}", video_path, e),
             }
         }
 
-        Ok(())
+        Ok(new_count)
     }
 
     async fn index_video(&self, path: &Path, subtitle_files: &[PathBuf]) -> Result<()> {
@@ -186,9 +189,10 @@ impl Scanner {
             updated_at: chrono::Utc::now().to_rfc3339(),
         };
 
-        let conn = self.db.conn();
+        let mut conn = self.db.conn();
+        let tx = conn.transaction()?;
 
-        conn.execute(
+        tx.execute(
             "INSERT OR REPLACE INTO media_items (
                 id, title, sort_title, media_type, year, file_path, file_size,
                 duration_secs, video_codec, video_width, video_height, video_bitrate,
@@ -236,7 +240,7 @@ impl Scanner {
 
         for sub_stream in &probe.subtitle_streams {
             let sub_id = Uuid::new_v4().to_string();
-            conn.execute(
+            tx.execute(
                 "INSERT INTO subtitles (id, media_id, stream_index, language, codec, is_forced, is_default, is_external)
                  VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 0)",
                 rusqlite::params![
@@ -262,7 +266,7 @@ impl Scanner {
                     .unwrap_or("srt")
                     .to_string();
                 let sub_id = Uuid::new_v4().to_string();
-                conn.execute(
+                tx.execute(
                     "INSERT INTO subtitles (id, media_id, file_path, language, codec, is_forced, is_default, is_external)
                      VALUES (?1, ?2, ?3, ?4, ?5, 0, 0, 1)",
                     rusqlite::params![
@@ -279,7 +283,7 @@ impl Scanner {
         if parsed.media_type == MediaType::Episode
             && let Some(ref show_name) = parsed.show_name
         {
-            let exists: bool = conn
+            let exists: bool = tx
                 .query_row(
                     "SELECT COUNT(*) FROM tv_shows WHERE name = ?1",
                     [show_name],
@@ -289,13 +293,14 @@ impl Scanner {
                 > 0;
             if !exists {
                 let show_id = Uuid::new_v4().to_string();
-                conn.execute(
+                tx.execute(
                     "INSERT INTO tv_shows (id, name, added_at) VALUES (?1, ?2, ?3)",
                     rusqlite::params![show_id, show_name, chrono::Utc::now().to_rfc3339()],
                 )?;
             }
         }
 
+        tx.commit()?;
         Ok(())
     }
 }
@@ -342,10 +347,10 @@ fn parse_filename(path: &Path) -> ParsedFilename {
     let mut last_year: Option<(usize, i32)> = None;
     for m in YEAR_RE.find_iter(&clean) {
         let digits = m.as_str().trim_matches(|c| c == '(' || c == ')' || c == '[' || c == ']');
-        if let Ok(y) = digits.parse::<i32>() {
-            if (1900..=2035).contains(&y) {
-                last_year = Some((m.start(), y));
-            }
+        if let Ok(y) = digits.parse::<i32>()
+            && (1900..=2035).contains(&y)
+        {
+            last_year = Some((m.start(), y));
         }
     }
     if let Some((pos, year)) = last_year {
@@ -391,14 +396,13 @@ fn make_sort_title(title: &str) -> String {
 }
 
 fn extract_subtitle_language(sub_stem: &str, video_stem: &str) -> Option<String> {
-    let suffix = &sub_stem[video_stem.len()..];
+    let suffix = sub_stem.strip_prefix(video_stem)?;
     let suffix = suffix.trim_start_matches(['.', '_', '-']);
     if suffix.is_empty() {
-        None
-    } else {
-        let lang = suffix.split(['.', '_', '-']).next().unwrap_or(suffix);
-        Some(lang.to_lowercase())
+        return None;
     }
+    let lang = suffix.split(['.', '_', '-']).next().unwrap_or(suffix);
+    Some(lang.to_lowercase())
 }
 
 #[cfg(test)]
@@ -523,6 +527,11 @@ mod tests {
     #[test]
     fn subtitle_language_none() {
         assert_eq!(extract_subtitle_language("movie", "movie"), None);
+    }
+
+    #[test]
+    fn subtitle_language_no_match() {
+        assert_eq!(extract_subtitle_language("other_file", "movie"), None);
     }
 
     #[test]

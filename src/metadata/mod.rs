@@ -3,9 +3,14 @@ use percent_encoding::{utf8_percent_encode, NON_ALPHANUMERIC};
 use reqwest::Client;
 use serde::Deserialize;
 use std::collections::HashMap;
+use std::time::Duration;
 use tracing::{debug, info, warn};
 
 use crate::db::Database;
+
+const TMDB_RATE_DELAY: Duration = Duration::from_millis(250);
+const TMDB_RETRY_DELAY: Duration = Duration::from_secs(2);
+const TMDB_MAX_RETRIES: u32 = 3;
 
 const TMDB_BASE_URL: &str = "https://api.themoviedb.org/3";
 pub const TMDB_IMAGE_BASE: &str = "https://image.tmdb.org/t/p";
@@ -23,9 +28,9 @@ struct SearchMovieResponse {
 }
 
 #[derive(Debug, Deserialize)]
-#[allow(dead_code)]
 struct TmdbMovie {
     id: i64,
+    #[allow(dead_code)]
     title: Option<String>,
     overview: Option<String>,
     poster_path: Option<String>,
@@ -41,9 +46,9 @@ struct SearchTvResponse {
 }
 
 #[derive(Debug, Deserialize)]
-#[allow(dead_code)]
 struct TmdbTvShow {
     id: i64,
+    #[allow(dead_code)]
     name: Option<String>,
     overview: Option<String>,
     poster_path: Option<String>,
@@ -54,10 +59,10 @@ struct TmdbTvShow {
 }
 
 #[derive(Debug, Deserialize)]
-#[allow(dead_code)]
 struct TmdbEpisode {
     name: Option<String>,
     overview: Option<String>,
+    #[allow(dead_code)]
     still_path: Option<String>,
     vote_average: Option<f64>,
     air_date: Option<String>,
@@ -223,7 +228,7 @@ impl TmdbClient {
                 }
             }
 
-            tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+            tokio::time::sleep(TMDB_RATE_DELAY).await;
         }
 
         Ok(())
@@ -279,7 +284,7 @@ impl TmdbClient {
                 Err(e) => warn!("TMDB search failed for show {}: {}", name, e),
             }
 
-            tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+            tokio::time::sleep(TMDB_RATE_DELAY).await;
         }
 
         Ok(())
@@ -327,11 +332,29 @@ impl TmdbClient {
                         debug!("Failed to get episode S{:02}E{:02}: {}", s, ep_num, e);
                     }
                 }
-                tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+                tokio::time::sleep(TMDB_RATE_DELAY).await;
             }
         }
 
         Ok(())
+    }
+
+    async fn request_with_retry(&self, url: &str) -> Result<reqwest::Response> {
+        let mut delay = TMDB_RETRY_DELAY;
+        for attempt in 0..=TMDB_MAX_RETRIES {
+            let resp = self.client.get(url).send().await?;
+            if resp.status() == reqwest::StatusCode::TOO_MANY_REQUESTS {
+                if attempt < TMDB_MAX_RETRIES {
+                    warn!("TMDB rate limited, retrying in {:?}", delay);
+                    tokio::time::sleep(delay).await;
+                    delay *= 2;
+                    continue;
+                }
+                anyhow::bail!("TMDB rate limit exceeded after {} retries", TMDB_MAX_RETRIES);
+            }
+            return Ok(resp);
+        }
+        unreachable!()
     }
 
     async fn search_movie(&self, title: &str, year: Option<i32>) -> Result<Option<TmdbMovie>> {
@@ -344,8 +367,9 @@ impl TmdbClient {
             url.push_str(&format!("&year={}", y));
         }
 
-        let resp: SearchMovieResponse = self.client.get(&url).send().await?.json().await?;
-        Ok(resp.results.into_iter().next())
+        let resp = self.request_with_retry(&url).await?;
+        let result: SearchMovieResponse = resp.json().await?;
+        Ok(result.results.into_iter().next())
     }
 
     async fn search_tv(&self, name: &str) -> Result<Option<TmdbTvShow>> {
@@ -355,8 +379,9 @@ impl TmdbClient {
             TMDB_BASE_URL, self.api_key, self.language, encoded,
         );
 
-        let resp: SearchTvResponse = self.client.get(&url).send().await?.json().await?;
-        Ok(resp.results.into_iter().next())
+        let resp = self.request_with_retry(&url).await?;
+        let result: SearchTvResponse = resp.json().await?;
+        Ok(result.results.into_iter().next())
     }
 
     async fn get_episode(
@@ -370,7 +395,7 @@ impl TmdbClient {
             TMDB_BASE_URL, show_id, season, episode, self.api_key, self.language,
         );
 
-        let resp = self.client.get(&url).send().await?;
+        let resp = self.request_with_retry(&url).await?;
         if resp.status().is_success() {
             let ep: TmdbEpisode = resp.json().await?;
             Ok(Some(ep))
