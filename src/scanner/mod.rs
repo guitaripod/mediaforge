@@ -1,6 +1,7 @@
 use anyhow::Result;
 use regex::Regex;
 use std::path::{Path, PathBuf};
+use std::sync::LazyLock;
 use tracing::{debug, info, warn};
 use uuid::Uuid;
 use walkdir::WalkDir;
@@ -15,6 +16,26 @@ const VIDEO_EXTENSIONS: &[&str] = &[
 
 const SUBTITLE_EXTENSIONS: &[&str] = &["srt", "vtt", "ass", "ssa", "sub", "idx"];
 
+static TV_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"(?i)(.+?)\s*[Ss](\d{1,2})\s*[Ee](\d{1,3})(?:\s*(.+))?").unwrap()
+});
+
+static YEAR_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"(.+?)\s*[\(\[]?(\d{4})[\)\]]?").unwrap()
+});
+
+static NOISE_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(
+        r"(?i)\s*(1080p|2160p|720p|480p|4k|uhd|bluray|blu-ray|bdrip|brrip|web-dl|web|webrip|hdtv|dvdrip|remux|remastered|hdr|hdr10|dv|hevc|h265|h264|x264|x265|av1|aac|dts|dts-hd|truehd|atmos|flac|ac3|dd5|ddp5|10bit|8bit|amzn|nf|atvp|dsnp|hmax).*$"
+    ).unwrap()
+});
+
+fn is_macos_resource_fork(path: &Path) -> bool {
+    path.file_name()
+        .and_then(|n| n.to_str())
+        .is_some_and(|n| n.starts_with("._"))
+}
+
 pub struct Scanner {
     db: Database,
     ffmpeg: FFmpeg,
@@ -25,7 +46,6 @@ impl Scanner {
         Self { db, ffmpeg }
     }
 
-    /// Scan all configured media directories
     pub async fn scan_directories(&self, dirs: &[PathBuf]) -> Result<()> {
         for dir in dirs {
             if !dir.exists() {
@@ -35,6 +55,37 @@ impl Scanner {
             info!("Scanning directory: {:?}", dir);
             self.scan_directory(dir).await?;
         }
+        self.prune_stale_entries()?;
+        Ok(())
+    }
+
+    fn prune_stale_entries(&self) -> Result<()> {
+        let conn = self.db.conn();
+        let mut stmt = conn.prepare("SELECT id, file_path FROM media_items")?;
+        let stale: Vec<(String, String)> = stmt
+            .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?
+            .filter_map(|r| r.ok())
+            .filter(|(_, path): &(String, String)| !Path::new(path).exists())
+            .collect();
+
+        if stale.is_empty() {
+            return Ok(());
+        }
+
+        info!("Pruning {} stale entries (files no longer on disk)", stale.len());
+        for (id, path) in &stale {
+            conn.execute("DELETE FROM media_items WHERE id = ?1", [id])?;
+            debug!("Pruned stale entry: {}", path);
+        }
+
+        let orphan_shows = conn.execute(
+            "DELETE FROM tv_shows WHERE name NOT IN (SELECT DISTINCT show_name FROM media_items WHERE show_name IS NOT NULL)",
+            [],
+        )?;
+        if orphan_shows > 0 {
+            info!("Pruned {} orphan TV show entries", orphan_shows);
+        }
+
         Ok(())
     }
 
@@ -48,7 +99,7 @@ impl Scanner {
             .filter_map(|e| e.ok())
         {
             let path = entry.path();
-            if !path.is_file() {
+            if !path.is_file() || is_macos_resource_fork(path) {
                 continue;
             }
 
@@ -69,7 +120,6 @@ impl Scanner {
         );
 
         for video_path in &video_files {
-            // Skip if already in database
             {
                 let conn = self.db.conn();
                 let path_str = video_path.to_string_lossy();
@@ -100,7 +150,6 @@ impl Scanner {
         let file_size = std::fs::metadata(path)?.len() as i64;
         let parsed = parse_filename(path);
 
-        // Probe the file
         let probe = self.ffmpeg.probe(path).await?;
 
         let id = Uuid::new_v4().to_string();
@@ -137,7 +186,6 @@ impl Scanner {
             updated_at: chrono::Utc::now().to_rfc3339(),
         };
 
-        // Insert into database
         {
             let conn = self.db.conn();
             conn.execute(
@@ -187,7 +235,6 @@ impl Scanner {
             )?;
         }
 
-        // Index embedded subtitles
         for sub_stream in &probe.subtitle_streams {
             let sub_id = Uuid::new_v4().to_string();
             let conn = self.db.conn();
@@ -206,11 +253,9 @@ impl Scanner {
             )?;
         }
 
-        // Find external subtitle files matching this video
         let video_stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or("");
         for sub_path in subtitle_files {
             let sub_stem = sub_path.file_stem().and_then(|s| s.to_str()).unwrap_or("");
-            // Match if subtitle filename starts with video filename
             if sub_stem.starts_with(video_stem) {
                 let language = extract_subtitle_language(sub_stem, video_stem);
                 let codec = sub_path
@@ -234,7 +279,6 @@ impl Scanner {
             }
         }
 
-        // Ensure TV show entry exists
         if parsed.media_type == MediaType::Episode
             && let Some(ref show_name) = parsed.show_name
         {
@@ -277,18 +321,13 @@ fn parse_filename(path: &Path) -> ParsedFilename {
         .and_then(|s| s.to_str())
         .unwrap_or("Unknown");
 
-    // Replace dots and underscores with spaces for parsing
     let clean = filename.replace(['.', '_'], " ");
 
-    // Try to match TV show pattern: S01E02 or s01e02
-    let tv_re = Regex::new(r"(?i)(.+?)\s*[Ss](\d{1,2})\s*[Ee](\d{1,3})(?:\s*(.+))?").unwrap();
-
-    if let Some(caps) = tv_re.captures(&clean) {
+    if let Some(caps) = TV_RE.captures(&clean) {
         let show_name = caps[1].trim().to_string();
         let season: i32 = caps[2].parse().unwrap_or(1);
         let episode: i32 = caps[3].parse().unwrap_or(1);
         let episode_title = caps.get(4).map(|m| {
-            // Clean up episode title - remove quality/codec info
             let raw = m.as_str().trim();
             clean_title_suffix(raw)
         });
@@ -304,9 +343,7 @@ fn parse_filename(path: &Path) -> ParsedFilename {
         };
     }
 
-    // Movie: try to extract year
-    let year_re = Regex::new(r"(.+?)\s*[\(\[]?(\d{4})[\)\]]?").unwrap();
-    if let Some(caps) = year_re.captures(&clean) {
+    if let Some(caps) = YEAR_RE.captures(&clean) {
         let title = caps[1].trim().to_string();
         let year: i32 = caps[2].parse().unwrap_or(0);
         if (1900..=2035).contains(&year) {
@@ -322,7 +359,6 @@ fn parse_filename(path: &Path) -> ParsedFilename {
         }
     }
 
-    // Fallback: use the cleaned filename
     ParsedFilename {
         title: clean_title_suffix(&clean),
         year: None,
@@ -334,12 +370,8 @@ fn parse_filename(path: &Path) -> ParsedFilename {
     }
 }
 
-/// Remove common quality/codec suffixes from titles
 fn clean_title_suffix(title: &str) -> String {
-    let noise_re = Regex::new(
-        r"(?i)\s*(1080p|2160p|720p|480p|4k|uhd|bluray|blu-ray|bdrip|brrip|web-dl|web|webrip|hdtv|dvdrip|remux|remastered|hdr|hdr10|dv|hevc|h265|h264|x264|x265|av1|aac|dts|dts-hd|truehd|atmos|flac|ac3|dd5|ddp5|10bit|8bit|amzn|nf|atvp|dsnp|hmax).*$"
-    ).unwrap();
-    noise_re.replace(title, "").trim().to_string()
+    NOISE_RE.replace(title, "").trim().to_string()
 }
 
 fn make_sort_title(title: &str) -> String {
@@ -361,7 +393,6 @@ fn extract_subtitle_language(sub_stem: &str, video_stem: &str) -> Option<String>
     if suffix.is_empty() {
         None
     } else {
-        // Common patterns: .en, .eng, .english, .en.forced
         let lang = suffix.split(['.', '_', '-']).next().unwrap_or(suffix);
         Some(lang.to_lowercase())
     }

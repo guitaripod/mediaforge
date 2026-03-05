@@ -143,13 +143,13 @@
 - Tracing middleware
 - Route group registration
 
-### 9. `src/api/routes.rs` — REST Endpoints ❌ NOT STARTED
-This is the main missing piece. Needs:
+### 9. `src/api/routes.rs` — REST Endpoints ✅ DONE
+All 25 endpoints implemented:
 
 #### Library Routes (`/api/library/`)
-- `GET /api/library/movies` — list all movies (paginated, sortable)
-- `GET /api/library/movies/:id` — movie detail with full metadata
-- `GET /api/library/shows` — list all TV shows
+- `GET /api/library/movies` — paginated, sortable (title/year/added/rating)
+- `GET /api/library/movies/:id` — movie detail with subtitles and playback state
+- `GET /api/library/shows` — list all TV shows with season/episode counts
 - `GET /api/library/shows/:id` — show detail with seasons
 - `GET /api/library/shows/:id/seasons/:season` — episodes in a season
 - `GET /api/library/recent` — recently added items
@@ -157,81 +157,83 @@ This is the main missing piece. Needs:
 
 #### Playback Routes (`/api/playback/`)
 - `GET /api/playback/:id/state` — get playback position
-- `PUT /api/playback/:id/state` — update position / mark watched
+- `PUT /api/playback/:id/state` — update position
 - `POST /api/playback/:id/watched` — mark as watched
 - `DELETE /api/playback/:id/watched` — mark as unwatched
 
 #### Streaming Routes (`/api/stream/`)
-- `GET /api/stream/:id/info` — stream info (codec, resolution, needs transcode?)
+- `GET /api/stream/:id/info` — stream info with transcode decision
 - `POST /api/stream/:id/hls/prepare` — kick off HLS generation
 - `GET /api/stream/:id/hls/status` — check HLS readiness
 - `GET /api/stream/:id/hls/playlist.m3u8` — serve HLS master playlist
-- `GET /api/stream/:id/hls/:segment` — serve HLS segment
-- `GET /api/stream/:id/direct` — direct file streaming (range requests)
-- `GET /api/stream/:id/subtitle/:sub_id` — serve subtitle as WebVTT
+- `GET /api/stream/:id/hls/:segment` — serve HLS segment (path traversal protected)
+- `GET /api/stream/:id/direct` — direct file streaming with HTTP Range support
+- `GET /api/stream/:id/subtitle/:sub_id` — serve subtitle as WebVTT (SRT conversion, embedded extraction)
 
 #### Metadata Routes (`/api/metadata/`)
 - `POST /api/metadata/scan` — trigger library scan
 - `POST /api/metadata/refresh` — trigger TMDB metadata refresh
-- `GET /api/metadata/poster/:tmdb_path` — proxy TMDB poster (cache locally)
+- `GET /api/metadata/poster/*path` — proxy and cache TMDB poster
 
 #### System Routes (`/api/system/`)
 - `GET /api/system/health` — health check
-- `GET /api/system/stats` — library stats (counts, sizes, etc.)
-- `GET /api/system/config` — current config (redacted)
+- `GET /api/system/stats` — library stats
+- `GET /api/system/config` — current config (API key redacted)
 
-### 10. `src/main.rs` — Entry Point ❌ NOT STARTED
-- CLI with `clap`: `serve`, `scan`, `config`
-- Server startup with graceful shutdown
-- Background tasks: periodic scan, HLS cache cleanup
+### 10. `src/main.rs` — Entry Point ✅ DONE
+- CLI with `clap`: `serve`, `scan`, `config show`, `config path`
+- Server startup with graceful shutdown (SIGINT/SIGTERM)
+- Background tasks: periodic library scan, HLS cache cleanup
 - Config loading and validation
 
 ---
 
-## What Still Needs Building
+## Build Status
 
-| Component | Status | Priority |
-|-----------|--------|----------|
-| `src/api/routes.rs` | ❌ Not started | **P0** — server is useless without endpoints |
-| `src/main.rs` | ❌ Stub only (`println!`) | **P0** — can't run without it |
-| Direct file streaming (range requests) | ❌ | **P0** — for iOS `AVPlayer` direct playback |
-| Background scan task | ❌ | **P1** — periodic re-scan |
-| File watcher (notify) | ❌ | **P2** — real-time library updates |
-| TMDB poster caching/proxy | ❌ | **P1** — avoid iOS app hitting TMDB directly |
-| README.md | ❌ | **P1** — project documentation |
-| .gitignore | ❌ | **P0** — before any git operations |
-| Compilation validation | ❌ | **P0** — must compile clean |
-| GitHub repo creation | ❌ | **P0** — final step |
+| Component | Status |
+|-----------|--------|
+| `src/api/routes.rs` | ✅ All 25 endpoints |
+| `src/main.rs` | ✅ CLI + server + background tasks |
+| Direct file streaming (range requests) | ✅ HTTP Range with ReaderStream |
+| Background scan task | ✅ Periodic re-scan on interval |
+| File watcher (notify) | ❌ Deferred — periodic scan sufficient for now |
+| TMDB poster caching/proxy | ✅ Disk-cached proxy endpoint |
+| README.md | ✅ Full docs + API reference |
+| .gitignore | ✅ |
+| Compilation validation | ✅ `cargo build --release` + `cargo clippy` clean |
+| GitHub repo creation | ✅ Pushed to `guitaripod/mediaforge` |
+| Library scan | ✅ 1301 movies, 2058 episodes, 35 shows, 4770 subtitles |
+| TMDB metadata | ✅ 145 movies, 1995 episodes, 31 shows matched |
 
 ---
 
 ## Review Loop Protocol
 
-### Loop 1: Complete Implementation
-1. Write `src/api/routes.rs` with all endpoints
-2. Write `src/main.rs` with CLI, server startup, background tasks
-3. Add direct file streaming with HTTP range request support
-4. Add `.gitignore`
-5. Verify `cargo build` succeeds with zero errors
+### Loop 1: Complete Implementation ✅
+1. ✅ Wrote `src/api/routes.rs` with all 25 endpoints
+2. ✅ Wrote `src/main.rs` with CLI, server startup, background tasks
+3. ✅ Direct file streaming with HTTP Range support (ReaderStream)
+4. ✅ Added `.gitignore`
+5. ✅ `cargo build` clean
 
-### Loop 2: Quality Review
-1. Read every file line by line
-2. Check for: unused imports, dead code, missing error handling
-3. Verify all API routes are consistent and complete
-4. Ensure all database queries use proper error handling
-5. Check HLS flow end-to-end: prepare → poll status → serve playlist → serve segments
-6. Verify direct streaming supports Range headers correctly
-7. Fix any issues found
-8. `cargo build` again — must be clean
-9. `cargo clippy` — fix all warnings
+### Loop 2: Quality Review ✅
+1. ✅ Read every file line by line
+2. ✅ Fixed: unused imports, dead code, MutexGuard held across .await
+3. ✅ All API routes consistent and complete
+4. ✅ Database queries use proper error handling
+5. ✅ HLS flow verified end-to-end
+6. ✅ Direct streaming Range headers correct
+7. ✅ Fixed variable shadowing bug in metadata, path traversal in HLS segments
+8. ✅ `cargo build` clean
+9. ✅ `cargo clippy` clean (fixed 6 collapsible_if, type_complexity, redundant_closure, etc.)
 
-### Loop 3: Polish & Ship
-1. Final read-through of all source files
-2. Add `README.md` with setup instructions, API reference, architecture
-3. Verify config defaults make sense for Marcus's setup
-4. Test that default media dirs point to `/mnt/stuff2/Movies` and `/mnt/stuff2/TV Shows`
-5. Final `cargo build --release` — must succeed
-6. Create GitHub repo, commit, push
+### Loop 3: Polish & Ship ✅
+1. ✅ Final read-through of all source files
+2. ✅ Added `README.md` with setup, API reference, architecture diagram
+3. ✅ Config defaults use Marcus's paths
+4. ✅ Media dirs point to `/mnt/stuff2/Movies` and `/mnt/stuff2/TV Shows`
+5. ✅ `cargo build --release` succeeds
+6. ✅ GitHub repo created, committed, pushed to `guitaripod/mediaforge`
 
 ---
 

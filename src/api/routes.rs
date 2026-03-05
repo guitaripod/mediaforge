@@ -369,11 +369,12 @@ async fn search_library(
     Query(params): Query<SearchParams>,
 ) -> AppResult<Json<Vec<MovieSummary>>> {
     let conn = state.db.conn();
-    let query = format!("%{}%", params.q);
+    let escaped = params.q.replace('%', "\\%").replace('_', "\\_");
+    let query = format!("%{}%", escaped);
 
     let mut stmt = conn.prepare(
         "SELECT id, title, year, poster_path, rating, duration_secs, video_width, video_height, hdr_format
-         FROM media_items WHERE title LIKE ?1 OR show_name LIKE ?1 OR episode_title LIKE ?1
+         FROM media_items WHERE title LIKE ?1 ESCAPE '\\' OR show_name LIKE ?1 ESCAPE '\\' OR episode_title LIKE ?1 ESCAPE '\\'
          ORDER BY sort_title LIMIT 50",
     )?;
 
@@ -655,12 +656,16 @@ async fn hls_segment(
         return Ok(StatusCode::NOT_FOUND.into_response());
     };
 
-    let content = tokio::fs::read(&path).await?;
-    Ok((
-        [(header::CONTENT_TYPE, "video/mp2t")],
-        content,
-    )
-        .into_response())
+    let file = tokio::fs::File::open(&path).await?;
+    let metadata = file.metadata().await?;
+    let stream = ReaderStream::new(file);
+
+    Ok(Response::builder()
+        .status(StatusCode::OK)
+        .header(header::CONTENT_TYPE, "video/mp2t")
+        .header(header::CONTENT_LENGTH, metadata.len())
+        .body(Body::from_stream(stream))
+        .unwrap())
 }
 
 async fn direct_stream(
@@ -735,17 +740,17 @@ fn parse_range(range: &str, file_size: u64) -> Result<(u64, u64), AppError> {
         return Err(anyhow::anyhow!("Invalid range format").into());
     }
 
-    let start: u64 = if parts[0].is_empty() {
+    let (start, end) = if parts[0].is_empty() {
         let suffix: u64 = parts[1].parse().map_err(|_| anyhow::anyhow!("Invalid range"))?;
-        file_size.saturating_sub(suffix)
+        (file_size.saturating_sub(suffix), file_size - 1)
     } else {
-        parts[0].parse().map_err(|_| anyhow::anyhow!("Invalid range"))?
-    };
-
-    let end: u64 = if parts[1].is_empty() {
-        file_size - 1
-    } else {
-        parts[1].parse().map_err(|_| anyhow::anyhow!("Invalid range"))?
+        let s: u64 = parts[0].parse().map_err(|_| anyhow::anyhow!("Invalid range"))?;
+        let e: u64 = if parts[1].is_empty() {
+            file_size - 1
+        } else {
+            parts[1].parse().map_err(|_| anyhow::anyhow!("Invalid range"))?
+        };
+        (s, e)
     };
 
     let end = end.min(file_size - 1);
@@ -812,6 +817,14 @@ async fn serve_subtitle(
     }
 
     if let Some(stream_index) = sub.stream_index {
+        let codec = sub.codec.as_deref().unwrap_or("");
+        if matches!(codec, "dvd_subtitle" | "hdmv_pgs_subtitle" | "pgssub" | "vobsub" | "dvb_subtitle") {
+            return Ok((
+                StatusCode::UNPROCESSABLE_ENTITY,
+                Json(serde_json::json!({ "error": "Bitmap-based subtitles cannot be converted to text" })),
+            ).into_response());
+        }
+
         let media_path: String = {
             let conn = state.db.conn();
             conn.query_row(
@@ -886,6 +899,9 @@ async fn trigger_refresh(
     let db = state.db.clone();
 
     tokio::spawn(async move {
+        if let Err(e) = tmdb.migrate_numeric_genres(&db).await {
+            error!("Genre migration failed: {}", e);
+        }
         if let Err(e) = tmdb.update_movie_metadata(&db).await {
             error!("Movie metadata refresh failed: {}", e);
         }

@@ -1,6 +1,8 @@
 use anyhow::Result;
+use percent_encoding::{utf8_percent_encode, NON_ALPHANUMERIC};
 use reqwest::Client;
 use serde::Deserialize;
+use std::collections::HashMap;
 use tracing::{debug, info, warn};
 
 use crate::db::Database;
@@ -61,6 +63,17 @@ struct TmdbEpisode {
     air_date: Option<String>,
 }
 
+#[derive(Debug, Deserialize)]
+struct GenreListResponse {
+    genres: Vec<Genre>,
+}
+
+#[derive(Debug, Deserialize)]
+struct Genre {
+    id: i64,
+    name: String,
+}
+
 impl TmdbClient {
     pub fn new(api_key: String, language: String) -> Self {
         Self {
@@ -74,12 +87,97 @@ impl TmdbClient {
         !self.api_key.is_empty()
     }
 
-    /// Fetch and update metadata for all movies missing TMDB data
+    async fn fetch_genre_map(&self, media_type: &str) -> Result<HashMap<i64, String>> {
+        let url = format!(
+            "{}/genre/{}/list?api_key={}&language={}",
+            TMDB_BASE_URL, media_type, self.api_key, self.language,
+        );
+        let resp: GenreListResponse = self.client.get(&url).send().await?.json().await?;
+        Ok(resp.genres.into_iter().map(|g| (g.id, g.name)).collect())
+    }
+
+    fn resolve_genres(ids: &Option<Vec<i64>>, genre_map: &HashMap<i64, String>) -> String {
+        ids.as_ref()
+            .map(|ids| {
+                ids.iter()
+                    .filter_map(|id| genre_map.get(id))
+                    .cloned()
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            })
+            .unwrap_or_default()
+    }
+
+    pub async fn migrate_numeric_genres(&self, db: &Database) -> Result<()> {
+        if !self.has_key() {
+            return Ok(());
+        }
+
+        let movie_genres = self.fetch_genre_map("movie").await.unwrap_or_default();
+        let tv_genres = self.fetch_genre_map("tv").await.unwrap_or_default();
+
+        let conn = db.conn();
+
+        let mut stmt = conn.prepare(
+            "SELECT id, genres FROM media_items WHERE genres IS NOT NULL AND genres GLOB '[0-9]*'"
+        )?;
+        let items: Vec<(String, String)> = stmt
+            .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?
+            .filter_map(|r| r.ok())
+            .collect();
+
+        if items.is_empty() {
+            return Ok(());
+        }
+
+        info!("Migrating {} items from numeric genre IDs to names", items.len());
+        for (id, raw) in &items {
+            let resolved: Vec<String> = raw
+                .split(',')
+                .filter_map(|s| s.trim().parse::<i64>().ok())
+                .filter_map(|gid| movie_genres.get(&gid).or_else(|| tv_genres.get(&gid)).cloned())
+                .collect();
+            if !resolved.is_empty() {
+                conn.execute(
+                    "UPDATE media_items SET genres = ?1 WHERE id = ?2",
+                    rusqlite::params![resolved.join(", "), id],
+                )?;
+            }
+        }
+
+        let mut stmt = conn.prepare(
+            "SELECT id, genres FROM tv_shows WHERE genres IS NOT NULL AND genres GLOB '[0-9]*'"
+        )?;
+        let shows: Vec<(String, String)> = stmt
+            .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?
+            .filter_map(|r| r.ok())
+            .collect();
+
+        for (id, raw) in &shows {
+            let resolved: Vec<String> = raw
+                .split(',')
+                .filter_map(|s| s.trim().parse::<i64>().ok())
+                .filter_map(|gid| tv_genres.get(&gid).cloned())
+                .collect();
+            if !resolved.is_empty() {
+                conn.execute(
+                    "UPDATE tv_shows SET genres = ?1 WHERE id = ?2",
+                    rusqlite::params![resolved.join(", "), id],
+                )?;
+            }
+        }
+
+        info!("Genre migration complete");
+        Ok(())
+    }
+
     pub async fn update_movie_metadata(&self, db: &Database) -> Result<()> {
         if !self.has_key() {
             info!("No TMDB API key configured, skipping metadata fetch");
             return Ok(());
         }
+
+        let genre_map = self.fetch_genre_map("movie").await.unwrap_or_default();
 
         let movies: Vec<(String, String, Option<i32>)> = {
             let conn = db.conn();
@@ -97,16 +195,7 @@ impl TmdbClient {
         for (id, title, year) in movies {
             match self.search_movie(&title, year).await {
                 Ok(Some(movie)) => {
-                    let genres = movie
-                        .genre_ids
-                        .as_ref()
-                        .map(|ids| {
-                            ids.iter()
-                                .map(|id| id.to_string())
-                                .collect::<Vec<_>>()
-                                .join(",")
-                        })
-                        .unwrap_or_default();
+                    let genres = Self::resolve_genres(&movie.genre_ids, &genre_map);
 
                     let conn = db.conn();
                     conn.execute(
@@ -134,18 +223,18 @@ impl TmdbClient {
                 }
             }
 
-            // Rate limit: TMDB allows ~40 requests per 10 seconds
             tokio::time::sleep(std::time::Duration::from_millis(250)).await;
         }
 
         Ok(())
     }
 
-    /// Fetch and update metadata for all TV shows missing TMDB data
     pub async fn update_tv_metadata(&self, db: &Database) -> Result<()> {
         if !self.has_key() {
             return Ok(());
         }
+
+        let genre_map = self.fetch_genre_map("tv").await.unwrap_or_default();
 
         let shows: Vec<(String, String)> = {
             let conn = db.conn();
@@ -160,18 +249,9 @@ impl TmdbClient {
         for (id, name) in shows {
             match self.search_tv(&name).await {
                 Ok(Some(show)) => {
-                    let genres = show
-                        .genre_ids
-                        .as_ref()
-                        .map(|ids| {
-                            ids.iter()
-                                .map(|id| id.to_string())
-                                .collect::<Vec<_>>()
-                                .join(",")
-                        })
-                        .unwrap_or_default();
-
+                    let genres = Self::resolve_genres(&show.genre_ids, &genre_map);
                     let tmdb_show_id = show.id;
+
                     {
                         let conn = db.conn();
                         conn.execute(
@@ -255,12 +335,10 @@ impl TmdbClient {
     }
 
     async fn search_movie(&self, title: &str, year: Option<i32>) -> Result<Option<TmdbMovie>> {
+        let encoded = utf8_percent_encode(title, NON_ALPHANUMERIC).to_string();
         let mut url = format!(
             "{}/search/movie?api_key={}&language={}&query={}",
-            TMDB_BASE_URL,
-            self.api_key,
-            self.language,
-            urlencoding(title),
+            TMDB_BASE_URL, self.api_key, self.language, encoded,
         );
         if let Some(y) = year {
             url.push_str(&format!("&year={}", y));
@@ -271,12 +349,10 @@ impl TmdbClient {
     }
 
     async fn search_tv(&self, name: &str) -> Result<Option<TmdbTvShow>> {
+        let encoded = utf8_percent_encode(name, NON_ALPHANUMERIC).to_string();
         let url = format!(
             "{}/search/tv?api_key={}&language={}&query={}",
-            TMDB_BASE_URL,
-            self.api_key,
-            self.language,
-            urlencoding(name),
+            TMDB_BASE_URL, self.api_key, self.language, encoded,
         );
 
         let resp: SearchTvResponse = self.client.get(&url).send().await?.json().await?;
@@ -303,18 +379,7 @@ impl TmdbClient {
         }
     }
 
-    /// Get poster URL for a given path
     pub fn poster_url(path: &str, size: &str) -> String {
         format!("{}/{}{}", TMDB_IMAGE_BASE, size, path)
     }
-}
-
-fn urlencoding(s: &str) -> String {
-    s.chars()
-        .map(|c| match c {
-            'A'..='Z' | 'a'..='z' | '0'..='9' | '-' | '_' | '.' | '~' => c.to_string(),
-            ' ' => "+".to_string(),
-            _ => format!("%{:02X}", c as u32),
-        })
-        .collect()
 }

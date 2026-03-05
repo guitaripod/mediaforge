@@ -1,13 +1,13 @@
 use anyhow::Result;
-use rusqlite::Connection;
+use r2d2::Pool;
+use r2d2_sqlite::SqliteConnectionManager;
 use std::path::Path;
-use std::sync::{Arc, Mutex};
 
 pub mod models;
 
 #[derive(Clone)]
 pub struct Database {
-    conn: Arc<Mutex<Connection>>,
+    pool: Pool<SqliteConnectionManager>,
 }
 
 impl Database {
@@ -15,17 +15,23 @@ impl Database {
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)?;
         }
-        let conn = Connection::open(path)?;
-        conn.execute_batch("PRAGMA journal_mode=WAL; PRAGMA foreign_keys=ON;")?;
-        let db = Self {
-            conn: Arc::new(Mutex::new(conn)),
-        };
+
+        let manager = SqliteConnectionManager::file(path)
+            .with_init(|conn| {
+                conn.execute_batch("PRAGMA journal_mode=WAL; PRAGMA foreign_keys=ON; PRAGMA busy_timeout=5000;")
+            });
+
+        let pool = Pool::builder()
+            .max_size(8)
+            .build(manager)?;
+
+        let db = Self { pool };
         db.migrate()?;
         Ok(db)
     }
 
     fn migrate(&self) -> Result<()> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.pool.get()?;
         conn.execute_batch(
             "
             CREATE TABLE IF NOT EXISTS media_items (
@@ -37,22 +43,18 @@ impl Database {
                 file_path TEXT NOT NULL UNIQUE,
                 file_size INTEGER NOT NULL DEFAULT 0,
                 duration_secs REAL,
-                -- Video info
                 video_codec TEXT,
                 video_width INTEGER,
                 video_height INTEGER,
                 video_bitrate INTEGER,
                 hdr_format TEXT,
-                -- Audio info
                 audio_codec TEXT,
                 audio_channels INTEGER,
                 audio_bitrate INTEGER,
-                -- TV show fields
                 show_name TEXT,
                 season_number INTEGER,
                 episode_number INTEGER,
                 episode_title TEXT,
-                -- TMDB metadata
                 tmdb_id INTEGER,
                 overview TEXT,
                 poster_path TEXT,
@@ -60,7 +62,6 @@ impl Database {
                 genres TEXT,
                 rating REAL,
                 release_date TEXT,
-                -- State
                 added_at TEXT NOT NULL DEFAULT (datetime('now')),
                 updated_at TEXT NOT NULL DEFAULT (datetime('now'))
             );
@@ -105,7 +106,7 @@ impl Database {
         Ok(())
     }
 
-    pub fn conn(&self) -> std::sync::MutexGuard<'_, Connection> {
-        self.conn.lock().unwrap()
+    pub fn conn(&self) -> r2d2::PooledConnection<SqliteConnectionManager> {
+        self.pool.get().expect("failed to get db connection from pool")
     }
 }

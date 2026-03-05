@@ -173,6 +173,8 @@ async fn run_scan(config: Config) -> anyhow::Result<()> {
 
     let tmdb = TmdbClient::new(config.tmdb.api_key.clone(), config.tmdb.language.clone());
     if tmdb.has_key() {
+        info!("Migrating genres...");
+        tmdb.migrate_numeric_genres(&db).await?;
         info!("Fetching TMDB metadata...");
         tmdb.update_movie_metadata(&db).await?;
         tmdb.update_tv_metadata(&db).await?;
