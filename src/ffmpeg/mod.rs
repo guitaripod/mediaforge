@@ -371,6 +371,135 @@ impl FFmpeg {
     }
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn native_video_h264() {
+        assert!(FFmpeg::is_ios_native_video("h264"));
+    }
+
+    #[test]
+    fn native_video_hevc_variants() {
+        assert!(FFmpeg::is_ios_native_video("hevc"));
+        assert!(FFmpeg::is_ios_native_video("h265"));
+    }
+
+    #[test]
+    fn native_video_case_insensitive() {
+        assert!(FFmpeg::is_ios_native_video("H264"));
+        assert!(FFmpeg::is_ios_native_video("HEVC"));
+    }
+
+    #[test]
+    fn non_native_video() {
+        assert!(!FFmpeg::is_ios_native_video("mpeg4"));
+        assert!(!FFmpeg::is_ios_native_video("vc1"));
+        assert!(!FFmpeg::is_ios_native_video("msmpeg4v3"));
+    }
+
+    #[test]
+    fn audio_transcode_dts() {
+        assert!(FFmpeg::needs_audio_transcode("dts"));
+        assert!(FFmpeg::needs_audio_transcode("dts-hd"));
+        assert!(FFmpeg::needs_audio_transcode("truehd"));
+    }
+
+    #[test]
+    fn audio_transcode_pcm() {
+        assert!(FFmpeg::needs_audio_transcode("pcm_s16le"));
+        assert!(FFmpeg::needs_audio_transcode("pcm_s24le"));
+        assert!(FFmpeg::needs_audio_transcode("pcm_s32le"));
+    }
+
+    #[test]
+    fn audio_no_transcode() {
+        assert!(!FFmpeg::needs_audio_transcode("aac"));
+        assert!(!FFmpeg::needs_audio_transcode("ac3"));
+        assert!(!FFmpeg::needs_audio_transcode("eac3"));
+        assert!(!FFmpeg::needs_audio_transcode("flac"));
+    }
+
+    #[test]
+    fn detect_hdr10() {
+        let stream = FfprobeStream {
+            index: 0,
+            codec_type: Some("video".into()),
+            codec_name: Some("hevc".into()),
+            width: Some(3840),
+            height: Some(2160),
+            bit_rate: None,
+            channels: None,
+            tags: Default::default(),
+            disposition: Default::default(),
+            color_transfer: Some("smpte2084".into()),
+            color_primaries: Some("bt2020".into()),
+            side_data_list: vec![],
+        };
+        assert_eq!(detect_hdr(&stream), Some("HDR10".to_string()));
+    }
+
+    #[test]
+    fn detect_hlg() {
+        let stream = FfprobeStream {
+            index: 0,
+            codec_type: Some("video".into()),
+            codec_name: Some("hevc".into()),
+            width: None,
+            height: None,
+            bit_rate: None,
+            channels: None,
+            tags: Default::default(),
+            disposition: Default::default(),
+            color_transfer: Some("arib-std-b67".into()),
+            color_primaries: Some("bt2020".into()),
+            side_data_list: vec![],
+        };
+        assert_eq!(detect_hdr(&stream), Some("HLG".to_string()));
+    }
+
+    #[test]
+    fn detect_dolby_vision() {
+        let stream = FfprobeStream {
+            index: 0,
+            codec_type: Some("video".into()),
+            codec_name: Some("hevc".into()),
+            width: None,
+            height: None,
+            bit_rate: None,
+            channels: None,
+            tags: Default::default(),
+            disposition: Default::default(),
+            color_transfer: None,
+            color_primaries: None,
+            side_data_list: vec![SideData {
+                side_data_type: Some("Dolby Vision Metadata".into()),
+            }],
+        };
+        assert_eq!(detect_hdr(&stream), Some("Dolby Vision".to_string()));
+    }
+
+    #[test]
+    fn detect_sdr() {
+        let stream = FfprobeStream {
+            index: 0,
+            codec_type: Some("video".into()),
+            codec_name: Some("h264".into()),
+            width: None,
+            height: None,
+            bit_rate: None,
+            channels: None,
+            tags: Default::default(),
+            disposition: Default::default(),
+            color_transfer: None,
+            color_primaries: None,
+            side_data_list: vec![],
+        };
+        assert_eq!(detect_hdr(&stream), None);
+    }
+}
+
 fn detect_hdr(stream: &FfprobeStream) -> Option<String> {
     // Check for Dolby Vision
     for sd in &stream.side_data_list {

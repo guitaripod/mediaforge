@@ -21,7 +21,7 @@ static TV_RE: LazyLock<Regex> = LazyLock::new(|| {
 });
 
 static YEAR_RE: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"(.+?)\s*[\(\[]?(\d{4})[\)\]]?").unwrap()
+    Regex::new(r"[\(\[]?(\d{4})[\)\]]?").unwrap()
 });
 
 static NOISE_RE: LazyLock<Regex> = LazyLock::new(|| {
@@ -343,20 +343,27 @@ fn parse_filename(path: &Path) -> ParsedFilename {
         };
     }
 
-    if let Some(caps) = YEAR_RE.captures(&clean) {
-        let title = caps[1].trim().to_string();
-        let year: i32 = caps[2].parse().unwrap_or(0);
-        if (1900..=2035).contains(&year) {
-            return ParsedFilename {
-                title,
-                year: Some(year),
-                media_type: MediaType::Movie,
-                show_name: None,
-                season_number: None,
-                episode_number: None,
-                episode_title: None,
-            };
+    let mut last_year: Option<(usize, i32)> = None;
+    for m in YEAR_RE.find_iter(&clean) {
+        let digits = m.as_str().trim_matches(|c| c == '(' || c == ')' || c == '[' || c == ']');
+        if let Ok(y) = digits.parse::<i32>() {
+            if (1900..=2035).contains(&y) {
+                last_year = Some((m.start(), y));
+            }
         }
+    }
+    if let Some((pos, year)) = last_year {
+        let title = clean[..pos].trim().to_string();
+        let title = clean_title_suffix(&title);
+        return ParsedFilename {
+            title,
+            year: Some(year),
+            media_type: MediaType::Movie,
+            show_name: None,
+            season_number: None,
+            episode_number: None,
+            episode_title: None,
+        };
     }
 
     ParsedFilename {
@@ -395,5 +402,152 @@ fn extract_subtitle_language(sub_stem: &str, video_stem: &str) -> Option<String>
     } else {
         let lang = suffix.split(['.', '_', '-']).next().unwrap_or(suffix);
         Some(lang.to_lowercase())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::Path;
+
+    #[test]
+    fn parse_movie_with_year() {
+        let p = parse_filename(Path::new("/movies/The Matrix (1999).mkv"));
+        assert_eq!(p.title, "The Matrix");
+        assert_eq!(p.year, Some(1999));
+        assert_eq!(p.media_type, MediaType::Movie);
+        assert!(p.show_name.is_none());
+    }
+
+    #[test]
+    fn parse_movie_with_year_no_parens() {
+        let p = parse_filename(Path::new("/movies/Blade.Runner.2049.2017.2160p.UHD.mkv"));
+        assert_eq!(p.title, "Blade Runner 2049");
+        assert_eq!(p.year, Some(2017));
+        assert_eq!(p.media_type, MediaType::Movie);
+    }
+
+    #[test]
+    fn parse_movie_no_year() {
+        let p = parse_filename(Path::new("/movies/Some Random Movie.mp4"));
+        assert_eq!(p.title, "Some Random Movie");
+        assert_eq!(p.year, None);
+        assert_eq!(p.media_type, MediaType::Movie);
+    }
+
+    #[test]
+    fn parse_tv_standard() {
+        let p = parse_filename(Path::new("/tv/Breaking.Bad.S01E01.Pilot.720p.mkv"));
+        assert_eq!(p.media_type, MediaType::Episode);
+        assert_eq!(p.show_name, Some("Breaking Bad".to_string()));
+        assert_eq!(p.season_number, Some(1));
+        assert_eq!(p.episode_number, Some(1));
+    }
+
+    #[test]
+    fn parse_tv_scene_naming() {
+        let p = parse_filename(Path::new("/tv/The.Office.S02E15.Boys.and.Girls.1080p.WEB-DL.mkv"));
+        assert_eq!(p.media_type, MediaType::Episode);
+        assert_eq!(p.show_name, Some("The Office".to_string()));
+        assert_eq!(p.season_number, Some(2));
+        assert_eq!(p.episode_number, Some(15));
+    }
+
+    #[test]
+    fn parse_tv_lowercase_sxxexx() {
+        let p = parse_filename(Path::new("/tv/show.s03e22.mkv"));
+        assert_eq!(p.media_type, MediaType::Episode);
+        assert_eq!(p.season_number, Some(3));
+        assert_eq!(p.episode_number, Some(22));
+    }
+
+    #[test]
+    fn parse_tv_three_digit_episode() {
+        let p = parse_filename(Path::new("/tv/Pokemon.S01E155.mkv"));
+        assert_eq!(p.episode_number, Some(155));
+    }
+
+    #[test]
+    fn parse_cleans_quality_suffixes() {
+        let p = parse_filename(Path::new("/movies/Movie.Name.2020.2160p.UHD.BluRay.HEVC.mkv"));
+        assert_eq!(p.title, "Movie Name");
+        assert_eq!(p.year, Some(2020));
+    }
+
+    #[test]
+    fn parse_underscores() {
+        let p = parse_filename(Path::new("/movies/My_Movie_2015.mp4"));
+        assert_eq!(p.title, "My Movie");
+        assert_eq!(p.year, Some(2015));
+    }
+
+    #[test]
+    fn parse_year_out_of_range() {
+        let p = parse_filename(Path::new("/movies/Title.1800.mkv"));
+        assert_eq!(p.year, None);
+    }
+
+    #[test]
+    fn sort_title_strips_articles() {
+        assert_eq!(make_sort_title("The Matrix"), "matrix");
+        assert_eq!(make_sort_title("A Beautiful Mind"), "beautiful mind");
+        assert_eq!(make_sort_title("An Officer"), "officer");
+        assert_eq!(make_sort_title("Matrix"), "matrix");
+    }
+
+    #[test]
+    fn sort_title_case_insensitive() {
+        assert_eq!(make_sort_title("THE GODFATHER"), "godfather");
+    }
+
+    #[test]
+    fn subtitle_language_english() {
+        assert_eq!(
+            extract_subtitle_language("movie.en", "movie"),
+            Some("en".to_string())
+        );
+    }
+
+    #[test]
+    fn subtitle_language_three_letter() {
+        assert_eq!(
+            extract_subtitle_language("movie.eng", "movie"),
+            Some("eng".to_string())
+        );
+    }
+
+    #[test]
+    fn subtitle_language_with_forced() {
+        assert_eq!(
+            extract_subtitle_language("movie.en.forced", "movie"),
+            Some("en".to_string())
+        );
+    }
+
+    #[test]
+    fn subtitle_language_none() {
+        assert_eq!(extract_subtitle_language("movie", "movie"), None);
+    }
+
+    #[test]
+    fn subtitle_language_dash_separator() {
+        assert_eq!(
+            extract_subtitle_language("movie-eng", "movie"),
+            Some("eng".to_string())
+        );
+    }
+
+    #[test]
+    fn macos_resource_fork_detected() {
+        assert!(is_macos_resource_fork(Path::new("/foo/._bar.mkv")));
+        assert!(!is_macos_resource_fork(Path::new("/foo/bar.mkv")));
+        assert!(!is_macos_resource_fork(Path::new("/foo/.hidden.mkv")));
+    }
+
+    #[test]
+    fn clean_title_strips_codec_info() {
+        assert_eq!(clean_title_suffix("Movie Name 1080p BluRay x264"), "Movie Name");
+        assert_eq!(clean_title_suffix("Show Title HEVC DTS-HD"), "Show Title");
+        assert_eq!(clean_title_suffix("Clean Title"), "Clean Title");
     }
 }

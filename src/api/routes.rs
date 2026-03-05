@@ -23,6 +23,7 @@ use crate::scanner::Scanner;
 
 type AppResult<T> = Result<T, AppError>;
 
+#[derive(Debug)]
 struct AppError(anyhow::Error);
 
 impl IntoResponse for AppError {
@@ -1078,4 +1079,108 @@ fn get_playback_state(
     .ok()
     .map(Ok)
     .transpose()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn range_standard() {
+        let (start, end) = parse_range("bytes=0-999", 10000).unwrap();
+        assert_eq!(start, 0);
+        assert_eq!(end, 999);
+    }
+
+    #[test]
+    fn range_open_ended() {
+        let (start, end) = parse_range("bytes=5000-", 10000).unwrap();
+        assert_eq!(start, 5000);
+        assert_eq!(end, 9999);
+    }
+
+    #[test]
+    fn range_suffix() {
+        let (start, end) = parse_range("bytes=-500", 10000).unwrap();
+        assert_eq!(start, 9500);
+        assert_eq!(end, 9999);
+    }
+
+    #[test]
+    fn range_suffix_larger_than_file() {
+        let (start, end) = parse_range("bytes=-50000", 10000).unwrap();
+        assert_eq!(start, 0);
+        assert_eq!(end, 9999);
+    }
+
+    #[test]
+    fn range_end_clamped_to_file_size() {
+        let (start, end) = parse_range("bytes=0-99999", 10000).unwrap();
+        assert_eq!(start, 0);
+        assert_eq!(end, 9999);
+    }
+
+    #[test]
+    fn range_single_byte() {
+        let (start, end) = parse_range("bytes=0-0", 10000).unwrap();
+        assert_eq!(start, 0);
+        assert_eq!(end, 0);
+    }
+
+    #[test]
+    fn range_last_byte() {
+        let (start, end) = parse_range("bytes=9999-9999", 10000).unwrap();
+        assert_eq!(start, 9999);
+        assert_eq!(end, 9999);
+    }
+
+    #[test]
+    fn range_past_eof_fails() {
+        assert!(parse_range("bytes=10000-10000", 10000).is_err());
+    }
+
+    #[test]
+    fn range_start_greater_than_end_fails() {
+        assert!(parse_range("bytes=500-100", 10000).is_err());
+    }
+
+    #[test]
+    fn range_missing_prefix_fails() {
+        assert!(parse_range("0-999", 10000).is_err());
+    }
+
+    #[test]
+    fn range_garbage_fails() {
+        assert!(parse_range("bytes=abc-def", 10000).is_err());
+    }
+
+    #[test]
+    fn srt_to_vtt_basic() {
+        let srt = "1\n00:00:01,000 --> 00:00:02,500\nHello world\n";
+        let vtt = srt_to_vtt(srt);
+        assert!(vtt.starts_with("WEBVTT"));
+        assert!(vtt.contains("00:00:01.000 --> 00:00:02.500"));
+        assert!(vtt.contains("Hello world"));
+    }
+
+    #[test]
+    fn srt_to_vtt_preserves_text() {
+        let srt = "1\n00:00:00,000 --> 00:00:01,000\nLine one\nLine two\n";
+        let vtt = srt_to_vtt(srt);
+        assert!(vtt.contains("Line one"));
+        assert!(vtt.contains("Line two"));
+    }
+
+    #[test]
+    fn srt_to_vtt_replaces_all_commas_in_timestamps() {
+        let srt = "1\n00:01:23,456 --> 00:04:56,789\nText\n";
+        let vtt = srt_to_vtt(srt);
+        assert!(vtt.contains("00:01:23.456 --> 00:04:56.789"));
+    }
+
+    #[test]
+    fn srt_to_vtt_empty_input() {
+        let vtt = srt_to_vtt("");
+        assert!(vtt.starts_with("WEBVTT"));
+    }
 }
