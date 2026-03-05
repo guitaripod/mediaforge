@@ -17,7 +17,7 @@ use crate::api::helpers::{get_audio_tracks_for_media, get_subtitles_for_media};
 use crate::api::AppState;
 use crate::db::models::{AudioTrack, Subtitle};
 use crate::ffmpeg::FFmpeg;
-use crate::hls::HlsStatus;
+use crate::hls::{HlsStatus, PrepareStreamParams};
 
 static HLS_SEGMENT_RE: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"^segment_\d{4}\.ts$").unwrap());
@@ -34,6 +34,8 @@ pub fn routes() -> Router<Arc<AppState>> {
         .route("/api/stream/{id}/hls/{variant}/playlist.m3u8", get(hls_variant_playlist))
         .route("/api/stream/{id}/hls/{variant}/{segment}", get(hls_segment))
         .route("/api/stream/{id}/direct", get(direct_stream))
+        .route("/api/stream/{id}/sprites/sprites.vtt", get(serve_sprite_vtt))
+        .route("/api/stream/{id}/sprites/sprites.jpg", get(serve_sprite_image))
         .route("/api/stream/{id}/subtitle/{sub_id}", get(serve_subtitle))
 }
 
@@ -51,6 +53,7 @@ struct StreamInfo {
     can_direct_play: bool,
     subtitles: Vec<Subtitle>,
     audio_tracks: Vec<AudioTrack>,
+    sprites_vtt: String,
 }
 
 struct StreamInfoRow {
@@ -112,6 +115,7 @@ async fn stream_info(
     let subtitles = get_subtitles_for_media(&conn, &id)?;
     let audio_tracks = get_audio_tracks_for_media(&conn, &id)?;
 
+    let sprites_vtt = format!("/api/stream/{}/sprites/sprites.vtt", item.id);
     Ok(Json(StreamInfo {
         id: item.id,
         video_codec: item.video_codec,
@@ -125,6 +129,7 @@ async fn stream_info(
         can_direct_play: can_direct,
         subtitles,
         audio_tracks,
+        sprites_vtt,
     })
     .into_response())
 }
@@ -141,16 +146,16 @@ async fn hls_prepare(
 ) -> AppResult<Response> {
     let conn = state.db.conn();
 
-    struct PrepareRow { file_path: String, video_codec: Option<String>, audio_codec: Option<String>, video_height: Option<i32> }
+    struct PrepareRow { file_path: String, video_codec: Option<String>, audio_codec: Option<String>, video_height: Option<i32>, duration_secs: Option<f64> }
     let item: Option<PrepareRow> = conn
         .query_row(
-            "SELECT file_path, video_codec, audio_codec, video_height FROM media_items WHERE id = ?1",
+            "SELECT file_path, video_codec, audio_codec, video_height, duration_secs FROM media_items WHERE id = ?1",
             [&id],
-            |row| Ok(PrepareRow { file_path: row.get(0)?, video_codec: row.get(1)?, audio_codec: row.get(2)?, video_height: row.get(3)? }),
+            |row| Ok(PrepareRow { file_path: row.get(0)?, video_codec: row.get(1)?, audio_codec: row.get(2)?, video_height: row.get(3)?, duration_secs: row.get(4)? }),
         )
         .ok();
 
-    let Some(PrepareRow { file_path, video_codec, mut audio_codec, video_height }) = item else {
+    let Some(PrepareRow { file_path, video_codec, mut audio_codec, video_height, duration_secs }) = item else {
         return Ok(
             (StatusCode::NOT_FOUND, Json(serde_json::json!({ "error": "Not found" })))
                 .into_response(),
@@ -188,14 +193,15 @@ async fn hls_prepare(
     let media_id = id.clone();
     tokio::spawn(async move {
         if let Err(e) = hls
-            .prepare_stream(
-                &media_id,
-                &file_path,
-                video_codec.as_deref(),
-                audio_codec.as_deref(),
+            .prepare_stream(PrepareStreamParams {
+                media_id: &media_id,
+                file_path: &file_path,
+                video_codec: video_codec.as_deref(),
+                audio_codec: audio_codec.as_deref(),
                 audio_stream_index,
-                video_height,
-            )
+                source_height: video_height,
+                duration_secs,
+            })
             .await
         {
             error!("HLS preparation failed for {}: {}", media_id, e);
@@ -210,15 +216,16 @@ async fn hls_status(
     Path(id): Path<String>,
 ) -> AppResult<Json<serde_json::Value>> {
     let status = state.hls.session_status(&id);
-    let (status_str, error) = match status {
-        Some(HlsStatus::Preparing) => ("preparing", None),
-        Some(HlsStatus::Ready) => ("ready", None),
-        Some(HlsStatus::Error(e)) => ("error", Some(e)),
-        None => ("not_found", None),
+    let (status_str, progress, error) = match status {
+        Some(HlsStatus::Preparing(pct)) => ("preparing", Some(pct), None),
+        Some(HlsStatus::Ready) => ("ready", None, None),
+        Some(HlsStatus::Error(e)) => ("error", None, Some(e)),
+        None => ("not_found", None, None),
     };
 
     Ok(Json(serde_json::json!({
         "status": status_str,
+        "progress": progress,
         "error": error,
     })))
 }
@@ -487,6 +494,70 @@ async fn serve_subtitle(
     }
 
     Ok((StatusCode::NOT_FOUND, Json(serde_json::json!({ "error": "Not found" }))).into_response())
+}
+
+async fn serve_sprite_vtt(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> AppResult<Response> {
+    let sprite_dir = state.config.transcoding.cache_dir.join("sprites").join(&id);
+    let vtt_path = sprite_dir.join("sprites.vtt");
+
+    if !vtt_path.exists() {
+        generate_sprites_for_media(&state, &id, &sprite_dir).await?;
+    }
+
+    if !vtt_path.exists() {
+        return Ok((StatusCode::NOT_FOUND, Json(serde_json::json!({ "error": "Not found" }))).into_response());
+    }
+
+    let content = tokio::fs::read_to_string(&vtt_path).await?;
+    Ok(([(header::CONTENT_TYPE, "text/vtt")], content).into_response())
+}
+
+async fn serve_sprite_image(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> AppResult<Response> {
+    let sprite_dir = state.config.transcoding.cache_dir.join("sprites").join(&id);
+    let img_path = sprite_dir.join("sprites.jpg");
+
+    if !img_path.exists() {
+        generate_sprites_for_media(&state, &id, &sprite_dir).await?;
+    }
+
+    if !img_path.exists() {
+        return Ok((StatusCode::NOT_FOUND, Json(serde_json::json!({ "error": "Not found" }))).into_response());
+    }
+
+    let data = tokio::fs::read(&img_path).await?;
+    Ok(([(header::CONTENT_TYPE, "image/jpeg")], data).into_response())
+}
+
+async fn generate_sprites_for_media(
+    state: &AppState,
+    media_id: &str,
+    sprite_dir: &std::path::Path,
+) -> Result<(), crate::api::error::AppError> {
+    let (file_path, duration): (String, Option<f64>) = {
+        let conn = state.db.conn();
+        conn.query_row(
+            "SELECT file_path, duration_secs FROM media_items WHERE id = ?1",
+            [media_id],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )?
+    };
+
+    let Some(duration) = duration else {
+        return Ok(());
+    };
+
+    state
+        .ffmpeg
+        .generate_sprites(std::path::Path::new(&file_path), sprite_dir, duration)
+        .await?;
+
+    Ok(())
 }
 
 fn srt_to_vtt(srt: &str) -> String {

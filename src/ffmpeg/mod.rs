@@ -2,10 +2,23 @@ use anyhow::{Context, Result};
 use serde::Deserialize;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
+use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::Command;
 use tracing::{debug, warn};
 
 use crate::db::models::{AudioStream, ProbeResult, SubtitleStream};
+
+pub type ProgressCallback = Box<dyn Fn(f32) + Send + Sync>;
+
+pub struct AdaptiveHlsParams {
+    pub input_path: PathBuf,
+    pub output_dir: PathBuf,
+    pub segment_duration: u32,
+    pub source_height: i32,
+    pub audio_stream_index: Option<i32>,
+    pub duration_secs: Option<f64>,
+    pub on_progress: ProgressCallback,
+}
 
 struct Rendition {
     name: &'static str,
@@ -278,12 +291,14 @@ impl FFmpeg {
 
     pub async fn generate_hls_adaptive(
         &self,
-        input_path: &Path,
-        output_dir: &Path,
-        segment_duration: u32,
-        source_height: i32,
-        audio_stream_index: Option<i32>,
+        params: AdaptiveHlsParams,
     ) -> Result<()> {
+        let AdaptiveHlsParams {
+            input_path, output_dir, segment_duration,
+            source_height, audio_stream_index,
+            duration_secs, on_progress,
+        } = params;
+
         let audio_map = match audio_stream_index {
             Some(idx) => format!("0:{}", idx),
             None => "0:a:0".to_string(),
@@ -298,7 +313,7 @@ impl FFmpeg {
 
         let mut cmd = Command::new(&self.ffmpeg_path);
         cmd.args(["-y", "-hide_banner", "-loglevel", "warning"]);
-        cmd.arg("-i").arg(input_path);
+        cmd.arg("-i").arg(&input_path);
 
         for _ in &active {
             cmd.args(["-map", "0:v:0", "-map", &audio_map]);
@@ -340,18 +355,41 @@ impl FFmpeg {
         cmd.arg(output_dir.join("%v").join("segment_%04d.ts"));
         cmd.arg(output_dir.join("%v").join("playlist.m3u8"));
 
+        cmd.args(["-progress", "pipe:2"]);
+
         debug!("Running adaptive HLS transcode: {:?}", cmd);
 
-        let output = cmd
-            .stdout(Stdio::piped())
+        let mut child = cmd
+            .stdout(Stdio::null())
             .stderr(Stdio::piped())
-            .output()
-            .await
-            .context("Failed to run ffmpeg for adaptive HLS")?;
+            .spawn()
+            .context("Failed to spawn ffmpeg for adaptive HLS")?;
 
-        if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            anyhow::bail!("FFmpeg adaptive HLS failed: {}", stderr);
+        let stderr = child.stderr.take()
+            .context("Failed to capture ffmpeg stderr")?;
+        let mut lines = BufReader::new(stderr).lines();
+        let mut last_stderr = String::new();
+
+        while let Some(line) = lines.next_line().await? {
+            if let Some(duration) = duration_secs
+                && duration > 0.0
+                && let Some(time_str) = line.strip_prefix("out_time_us=")
+                && let Ok(us) = time_str.trim().parse::<i64>()
+            {
+                let secs = us as f64 / 1_000_000.0;
+                let pct = (secs / duration * 100.0).min(100.0) as f32;
+                on_progress(pct);
+            }
+            let is_progress_line = line.starts_with("out_time") || line.starts_with("frame=") || line.starts_with("progress=") || line.starts_with("bitrate=") || line.starts_with("total_size=") || line.starts_with("speed=") || line.starts_with("stream_") || line.starts_with("dup_frames=") || line.starts_with("drop_frames=") || line.starts_with("fps=");
+            if !is_progress_line {
+                last_stderr.push_str(&line);
+                last_stderr.push('\n');
+            }
+        }
+
+        let status = child.wait().await?;
+        if !status.success() {
+            anyhow::bail!("FFmpeg adaptive HLS failed: {}", last_stderr.trim());
         }
 
         Ok(())
@@ -392,6 +430,58 @@ impl FFmpeg {
         }
 
         Ok(())
+    }
+
+    pub async fn generate_sprites(
+        &self,
+        input_path: &Path,
+        output_dir: &Path,
+        duration_secs: f64,
+    ) -> Result<SpriteResult> {
+        std::fs::create_dir_all(output_dir)?;
+
+        let interval = sprite_interval(duration_secs);
+        let total_thumbs = (duration_secs / interval as f64).ceil() as u32;
+        let cols = 10u32;
+        let rows = (total_thumbs as f64 / cols as f64).ceil() as u32;
+
+        let output_path = output_dir.join("sprites.jpg");
+
+        let mut cmd = Command::new(&self.ffmpeg_path);
+        cmd.args(["-y", "-hide_banner", "-loglevel", "warning"]);
+        cmd.arg("-i").arg(input_path);
+        cmd.args([
+            "-vf",
+            &format!("fps=1/{},scale=160:-1,tile={}x{}", interval, cols, rows),
+            "-q:v", "5",
+            "-frames:v", "1",
+        ]);
+        cmd.arg(&output_path);
+
+        debug!("Running sprite generation: {:?}", cmd);
+
+        let output = cmd
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .output()
+            .await
+            .context("Failed to run ffmpeg for sprite generation")?;
+
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            anyhow::bail!("FFmpeg sprite generation failed: {}", stderr);
+        }
+
+        let thumb_width = 160u32;
+        let thumb_height = {
+            let (_, h) = image_dimensions(&output_path)?;
+            h / rows.max(1)
+        };
+
+        let vtt = generate_sprite_vtt(duration_secs, interval, cols, thumb_width, thumb_height);
+        std::fs::write(output_dir.join("sprites.vtt"), &vtt)?;
+
+        Ok(SpriteResult { interval, cols, rows, thumb_width, thumb_height })
     }
 
     /// Check if a video codec can be direct-played
@@ -568,6 +658,103 @@ mod tests {
         assert_eq!(rendition_names(360), vec!["360p"]);
         assert_eq!(rendition_names(240), vec!["360p"]);
     }
+
+    #[test]
+    fn sprite_interval_short_video() {
+        assert_eq!(sprite_interval(30.0), 2);
+        assert_eq!(sprite_interval(59.9), 2);
+    }
+
+    #[test]
+    fn sprite_interval_medium_video() {
+        assert_eq!(sprite_interval(60.0), 5);
+        assert_eq!(sprite_interval(300.0), 5);
+        assert_eq!(sprite_interval(599.0), 5);
+    }
+
+    #[test]
+    fn sprite_interval_long_video() {
+        assert_eq!(sprite_interval(600.0), 10);
+        assert_eq!(sprite_interval(7200.0), 10);
+    }
+
+    #[test]
+    fn vtt_time_format() {
+        assert_eq!(format_vtt_time(0.0), "00:00:00.000");
+        assert_eq!(format_vtt_time(65.5), "00:01:05.500");
+        assert_eq!(format_vtt_time(3661.123), "01:01:01.123");
+    }
+
+    #[test]
+    fn sprite_vtt_basic() {
+        let vtt = generate_sprite_vtt(25.0, 10, 10, 160, 90);
+        assert!(vtt.starts_with("WEBVTT"));
+        assert!(vtt.contains("sprites.jpg#xywh=0,0,160,90"));
+        assert!(vtt.contains("sprites.jpg#xywh=160,0,160,90"));
+        assert!(vtt.contains("sprites.jpg#xywh=320,0,160,90"));
+        assert!(vtt.contains("00:00:00.000 --> 00:00:10.000"));
+        assert!(vtt.contains("00:00:10.000 --> 00:00:20.000"));
+        assert!(vtt.contains("00:00:20.000 --> 00:00:25.000"));
+    }
+
+    #[test]
+    fn sprite_vtt_wraps_rows() {
+        let vtt = generate_sprite_vtt(110.0, 10, 5, 160, 90);
+        assert!(vtt.contains("sprites.jpg#xywh=0,0,160,90"));
+        assert!(vtt.contains("sprites.jpg#xywh=640,0,160,90"));
+        assert!(vtt.contains("sprites.jpg#xywh=0,90,160,90"));
+    }
+}
+
+#[allow(dead_code)]
+pub struct SpriteResult {
+    pub interval: u32,
+    pub cols: u32,
+    pub rows: u32,
+    pub thumb_width: u32,
+    pub thumb_height: u32,
+}
+
+fn sprite_interval(duration_secs: f64) -> u32 {
+    if duration_secs < 60.0 { 2 }
+    else if duration_secs < 600.0 { 5 }
+    else { 10 }
+}
+
+fn image_dimensions(path: &Path) -> Result<(u32, u32)> {
+    let data = std::fs::read(path)?;
+    let mut decoder = jpeg_decoder::Decoder::new(std::io::Cursor::new(data));
+    decoder.read_info().context("Failed to read JPEG header")?;
+    let info = decoder.info().context("No JPEG info")?;
+    Ok((info.width as u32, info.height as u32))
+}
+
+fn generate_sprite_vtt(duration: f64, interval: u32, cols: u32, tw: u32, th: u32) -> String {
+    let mut vtt = String::from("WEBVTT\n\n");
+    let total = (duration / interval as f64).ceil() as u32;
+    for i in 0..total {
+        let start = i as f64 * interval as f64;
+        let end = ((i + 1) as f64 * interval as f64).min(duration);
+        let col = i % cols;
+        let row = i / cols;
+        let x = col * tw;
+        let y = row * th;
+
+        vtt.push_str(&format!(
+            "{} --> {}\nsprites.jpg#xywh={},{},{},{}\n\n",
+            format_vtt_time(start),
+            format_vtt_time(end),
+            x, y, tw, th
+        ));
+    }
+    vtt
+}
+
+fn format_vtt_time(secs: f64) -> String {
+    let h = (secs / 3600.0) as u32;
+    let m = ((secs % 3600.0) / 60.0) as u32;
+    let s = secs % 60.0;
+    format!("{:02}:{:02}:{:06.3}", h, m, s)
 }
 
 fn detect_hdr(stream: &FfprobeStream) -> Option<String> {

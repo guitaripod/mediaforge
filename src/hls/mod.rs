@@ -5,7 +5,17 @@ use std::sync::Arc;
 use tokio::sync::Semaphore;
 use tracing::{debug, info};
 
-use crate::ffmpeg::FFmpeg;
+use crate::ffmpeg::{AdaptiveHlsParams, FFmpeg, ProgressCallback};
+
+pub struct PrepareStreamParams<'a> {
+    pub media_id: &'a str,
+    pub file_path: &'a str,
+    pub video_codec: Option<&'a str>,
+    pub audio_codec: Option<&'a str>,
+    pub audio_stream_index: Option<i32>,
+    pub source_height: Option<i32>,
+    pub duration_secs: Option<f64>,
+}
 
 /// Manages HLS session creation, caching, and cleanup
 #[derive(Clone)]
@@ -30,7 +40,7 @@ pub struct HlsSession {
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum HlsStatus {
-    Preparing,
+    Preparing(f32),
     Ready,
     Error(String),
 }
@@ -52,15 +62,11 @@ impl HlsManager {
         }
     }
 
-    pub async fn prepare_stream(
-        &self,
-        media_id: &str,
-        file_path: &str,
-        video_codec: Option<&str>,
-        audio_codec: Option<&str>,
-        audio_stream_index: Option<i32>,
-        source_height: Option<i32>,
-    ) -> Result<HlsSession> {
+    pub async fn prepare_stream(&self, params: PrepareStreamParams<'_>) -> Result<HlsSession> {
+        let PrepareStreamParams {
+            media_id, file_path, video_codec, audio_codec,
+            audio_stream_index, source_height, duration_secs,
+        } = params;
         let session_key = match audio_stream_index {
             Some(idx) => format!("{}_a{}", media_id, idx),
             None => media_id.to_string(),
@@ -103,7 +109,7 @@ impl HlsManager {
             media_id: media_id.to_string(),
             output_dir: output_dir.clone(),
             needs_transcode,
-            status: HlsStatus::Preparing,
+            status: HlsStatus::Preparing(0.0),
         };
         self.sessions
             .insert(session_key.clone(), session.clone());
@@ -116,11 +122,27 @@ impl HlsManager {
         let _permit = self.transcode_semaphore.acquire().await?;
 
         let input_path = Path::new(file_path);
+        let sessions = self.sessions.clone();
+        let sk = session_key.clone();
+        let on_progress: ProgressCallback = Box::new(move |pct| {
+            if let Some(mut session) = sessions.get_mut(&sk)
+                && matches!(session.status, HlsStatus::Preparing(_))
+            {
+                session.status = HlsStatus::Preparing(pct);
+            }
+        });
 
         let result = if needs_video_transcode {
-            let height = source_height.unwrap_or(1080);
             self.ffmpeg
-                .generate_hls_adaptive(input_path, &output_dir, self.segment_duration, height, audio_stream_index)
+                .generate_hls_adaptive(AdaptiveHlsParams {
+                    input_path: input_path.to_path_buf(),
+                    output_dir: output_dir.clone(),
+                    segment_duration: self.segment_duration,
+                    source_height: source_height.unwrap_or(1080),
+                    audio_stream_index,
+                    duration_secs,
+                    on_progress,
+                })
                 .await
         } else {
             self.ffmpeg
@@ -266,15 +288,32 @@ mod tests {
             media_id: "media1".into(),
             output_dir: PathBuf::from("/tmp/b"),
             needs_transcode: true,
-            status: HlsStatus::Preparing,
+            status: HlsStatus::Preparing(0.0),
         });
 
-        assert_eq!(mgr.session_status("media1"), Some(HlsStatus::Preparing));
+        assert_eq!(mgr.session_status("media1"), Some(HlsStatus::Preparing(0.0)));
     }
 
     #[test]
     fn resolve_returns_none_without_active() {
         let mgr = test_manager();
         assert!(mgr.resolve("media1").is_none());
+    }
+
+    #[test]
+    fn preparing_status_includes_progress() {
+        let mgr = test_manager();
+        mgr.active.insert("media1".into(), "media1".into());
+        mgr.sessions.insert("media1".into(), HlsSession {
+            media_id: "media1".into(),
+            output_dir: PathBuf::from("/tmp/test"),
+            needs_transcode: true,
+            status: HlsStatus::Preparing(0.0),
+        });
+
+        assert_eq!(mgr.session_status("media1"), Some(HlsStatus::Preparing(0.0)));
+
+        mgr.sessions.get_mut("media1").unwrap().status = HlsStatus::Preparing(42.5);
+        assert_eq!(mgr.session_status("media1"), Some(HlsStatus::Preparing(42.5)));
     }
 }
