@@ -29,6 +29,7 @@ mod genres_as_vec {
 pub struct MediaItem {
     pub id: String,
     pub title: String,
+    #[serde(skip_serializing)]
     pub sort_title: String,
     pub media_type: MediaType,
     pub year: Option<i32>,
@@ -36,15 +37,15 @@ pub struct MediaItem {
     pub file_path: String,
     pub file_size: i64,
     pub duration_secs: Option<f64>,
-    // Video
     pub video_codec: Option<String>,
     pub video_width: Option<i32>,
     pub video_height: Option<i32>,
+    #[serde(skip_serializing)]
     pub video_bitrate: Option<i64>,
     pub hdr_format: Option<String>,
-    // Audio
     pub audio_codec: Option<String>,
     pub audio_channels: Option<i32>,
+    #[serde(skip_serializing)]
     pub audio_bitrate: Option<i64>,
     // TV
     pub show_name: Option<String>,
@@ -96,6 +97,7 @@ impl std::str::FromStr for MediaType {
 pub struct Subtitle {
     pub id: String,
     pub media_id: String,
+    #[serde(skip_serializing)]
     pub file_path: Option<String>,
     pub stream_index: Option<i32>,
     pub language: Option<String>,
@@ -130,9 +132,10 @@ pub struct TvShow {
 
 /// Summary for library browsing
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct MovieSummary {
+pub struct MediaSummary {
     pub id: String,
     pub title: String,
+    pub media_type: String,
     pub year: Option<i32>,
     pub poster_path: Option<String>,
     pub rating: Option<f64>,
@@ -148,6 +151,7 @@ pub struct TvShowSummary {
     pub name: String,
     pub poster_path: Option<String>,
     pub rating: Option<f64>,
+    pub first_air_date: Option<String>,
     pub season_count: i32,
     pub episode_count: i32,
 }
