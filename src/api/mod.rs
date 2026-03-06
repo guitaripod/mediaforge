@@ -165,7 +165,7 @@ async fn api_index() -> Json<serde_json::Value> {
         "endpoints": {
             "library": {
                 "movies": "/api/library/movies?page=1&per_page=50&sort={title|year|added|rating}&genre={genre}",
-                "shows": "/api/library/shows?sort={name|added|rating}",
+                "shows": "/api/library/shows?page=1&per_page=50&sort={name|added|rating}",
                 "episodes": "/api/library/episodes/{id}",
                 "continue": "/api/library/continue",
                 "ondeck": "/api/library/ondeck",

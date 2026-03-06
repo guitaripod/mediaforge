@@ -37,6 +37,7 @@ pub fn routes() -> Router<Arc<AppState>> {
 
 #[derive(Deserialize)]
 struct ListParams {
+    page: Option<u32>,
     per_page: Option<u32>,
     sort: Option<String>,
 }
@@ -185,8 +186,17 @@ async fn get_movie(
 async fn list_shows(
     State(state): State<Arc<AppState>>,
     Query(params): Query<ListParams>,
-) -> AppResult<Json<Vec<TvShowSummary>>> {
+) -> AppResult<Json<PaginatedResponse<TvShowSummary>>> {
+    let page = params.page.unwrap_or(1).max(1);
+    let per_page = params.per_page.unwrap_or(50).min(200);
+    let offset = (page - 1) * per_page;
     let conn = state.db.conn();
+
+    let total: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM tv_shows",
+        [],
+        |row| row.get(0),
+    )?;
 
     let order = match params.sort.as_deref() {
         Some("name") => "t.name ASC",
@@ -204,13 +214,13 @@ async fn list_shows(
          LEFT JOIN media_items m ON m.show_name = t.name AND m.media_type = 'episode'
          LEFT JOIN playback_state p ON m.id = p.media_id
          GROUP BY t.id
-         ORDER BY {}",
+         ORDER BY {} LIMIT ?1 OFFSET ?2",
         order
     );
 
     let mut stmt = conn.prepare(&query)?;
     let shows: Vec<TvShowSummary> = stmt
-        .query_map([], |row| {
+        .query_map(rusqlite::params![per_page, offset], |row| {
             Ok(TvShowSummary {
                 id: row.get(0)?,
                 name: row.get(1)?,
@@ -225,7 +235,15 @@ async fn list_shows(
         .filter_map(|r| r.ok())
         .collect();
 
-    Ok(Json(shows))
+    let total_pages = ((total as f64) / (per_page as f64)).ceil() as u32;
+
+    Ok(Json(PaginatedResponse {
+        items: shows,
+        total,
+        page,
+        per_page,
+        total_pages,
+    }))
 }
 
 async fn get_show(
@@ -739,20 +757,54 @@ async fn search_library(
 
     let conn = state.db.conn();
     let escaped = params.q.replace('%', "\\%").replace('_', "\\_");
-    let query = format!("%{}%", escaped);
+    let pattern = format!("%{}%", escaped);
 
-    let mut stmt = conn.prepare(
+    let mut show_stmt = conn.prepare(
+        "SELECT t.id, t.name, t.poster_path, t.rating, t.first_air_date
+         FROM tv_shows t
+         WHERE t.name LIKE ?1 ESCAPE '\\'
+         ORDER BY t.name LIMIT 10",
+    )?;
+    let shows: Vec<SearchResult> = show_stmt
+        .query_map([&pattern], |row| {
+            let first_air_date: Option<String> = row.get(4)?;
+            let year = first_air_date
+                .as_deref()
+                .and_then(|d| d.get(..4))
+                .and_then(|y| y.parse::<i32>().ok());
+            Ok(SearchResult {
+                id: row.get(0)?,
+                title: row.get(1)?,
+                media_type: "show".to_string(),
+                year,
+                poster_path: row.get(2)?,
+                rating: row.get(3)?,
+                duration_secs: None,
+                video_width: None,
+                video_height: None,
+                hdr_format: None,
+                show_name: None,
+                season_number: None,
+                episode_number: None,
+                episode_title: None,
+            })
+        })?
+        .filter_map(|r| r.ok())
+        .collect();
+
+    let media_limit = 50 - shows.len().min(50) as u32;
+    let mut media_stmt = conn.prepare(
         "SELECT m.id, m.title, m.media_type, m.year, COALESCE(m.poster_path, t.poster_path),
                 m.rating, m.duration_secs, m.video_width, m.video_height, m.hdr_format,
                 m.show_name, m.season_number, m.episode_number, m.episode_title
          FROM media_items m
          LEFT JOIN tv_shows t ON m.show_name = t.name AND m.media_type = 'episode'
          WHERE m.title LIKE ?1 ESCAPE '\\' OR m.show_name LIKE ?1 ESCAPE '\\' OR m.episode_title LIKE ?1 ESCAPE '\\'
-         ORDER BY m.sort_title LIMIT 50",
+         ORDER BY m.sort_title LIMIT ?2",
     )?;
 
-    let items: Vec<SearchResult> = stmt
-        .query_map([&query], |row| {
+    let media: Vec<SearchResult> = media_stmt
+        .query_map(rusqlite::params![pattern, media_limit], |row| {
             Ok(SearchResult {
                 id: row.get(0)?,
                 title: row.get(1)?,
@@ -773,5 +825,8 @@ async fn search_library(
         .filter_map(|r| r.ok())
         .collect();
 
-    Ok(Json(items).into_response())
+    let mut results = shows;
+    results.extend(media);
+
+    Ok(Json(results).into_response())
 }
