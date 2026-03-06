@@ -302,7 +302,8 @@ async fn next_episode(
              WHERE m.show_name = ?1 AND m.media_type = 'episode'
                AND m.season_number IS NOT NULL AND m.episode_number IS NOT NULL
                AND COALESCE(p.is_watched, 0) = 0
-             ORDER BY m.season_number ASC, m.episode_number ASC
+             ORDER BY (CASE WHEN COALESCE(p.position_secs, 0) > 0 THEN 0 ELSE 1 END),
+                      m.season_number ASC, m.episode_number ASC
              LIMIT 1",
             [&show_name],
             |row| {
@@ -480,6 +481,7 @@ struct SearchResult {
     show_name: Option<String>,
     season_number: Option<i32>,
     episode_number: Option<i32>,
+    episode_title: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -505,7 +507,7 @@ async fn search_library(
     let mut stmt = conn.prepare(
         "SELECT m.id, m.title, m.media_type, m.year, COALESCE(m.poster_path, t.poster_path),
                 m.rating, m.duration_secs, m.video_width, m.video_height, m.hdr_format,
-                m.show_name, m.season_number, m.episode_number
+                m.show_name, m.season_number, m.episode_number, m.episode_title
          FROM media_items m
          LEFT JOIN tv_shows t ON m.show_name = t.name AND m.media_type = 'episode'
          WHERE m.title LIKE ?1 ESCAPE '\\' OR m.show_name LIKE ?1 ESCAPE '\\' OR m.episode_title LIKE ?1 ESCAPE '\\'
@@ -528,6 +530,7 @@ async fn search_library(
                 show_name: row.get(10)?,
                 season_number: row.get(11)?,
                 episode_number: row.get(12)?,
+                episode_title: row.get(13)?,
             })
         })?
         .filter_map(|r| r.ok())
