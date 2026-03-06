@@ -36,13 +36,10 @@ pub async fn run(config: CleanupConfig, hls: HlsManager, db: Database, cache_dir
         );
 
         let conn = db.conn();
-        let retention = config.activity_retention_days;
+        let retention = format!("-{} days", config.activity_retention_days);
         match conn.execute(
-            &format!(
-                "DELETE FROM activity_log WHERE created_at < datetime('now', '-{} days')",
-                retention
-            ),
-            [],
+            "DELETE FROM activity_log WHERE created_at < datetime('now', ?1)",
+            [&retention],
         ) {
             Ok(n) if n > 0 => {
                 info!("Pruned {} old activity log entries", n);
