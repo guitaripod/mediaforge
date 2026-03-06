@@ -74,14 +74,18 @@ impl ScanStatus {
         self.tx.subscribe()
     }
 
+    fn lock(&self) -> std::sync::MutexGuard<'_, ScanStatusInner> {
+        self.inner.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
     pub fn is_running(&self) -> bool {
-        let s = self.inner.lock().unwrap();
+        let s = self.lock();
         !matches!(s.current, ScanPhase::Idle)
     }
 
     pub fn start_scan(&self) {
         let snapshot = {
-            let mut s = self.inner.lock().unwrap();
+            let mut s = self.lock();
             s.current = ScanPhase::Scanning {
                 started_at: chrono::Utc::now().to_rfc3339(),
                 items_found: 0,
@@ -94,7 +98,7 @@ impl ScanStatus {
 
     pub fn set_items_found(&self, count: u32) {
         let snapshot = {
-            let mut s = self.inner.lock().unwrap();
+            let mut s = self.lock();
             match &mut s.current {
                 ScanPhase::Scanning { items_found, .. }
                 | ScanPhase::FetchingMetadata { items_found, .. } => *items_found = count,
@@ -107,7 +111,7 @@ impl ScanStatus {
 
     pub fn start_metadata(&self) {
         let snapshot = {
-            let mut s = self.inner.lock().unwrap();
+            let mut s = self.lock();
             let (started, found) = match &s.current {
                 ScanPhase::Scanning { started_at, items_found } => {
                     (started_at.clone(), *items_found)
@@ -125,7 +129,7 @@ impl ScanStatus {
 
     pub fn finish(&self) {
         let snapshot = {
-            let mut s = self.inner.lock().unwrap();
+            let mut s = self.lock();
             s.current = ScanPhase::Idle;
             s.last_completed_at = Some(chrono::Utc::now().to_rfc3339());
             Self::build_json(&s)
@@ -135,7 +139,7 @@ impl ScanStatus {
 
     pub fn fail(&self, error: String) {
         let snapshot = {
-            let mut s = self.inner.lock().unwrap();
+            let mut s = self.lock();
             s.current = ScanPhase::Idle;
             s.last_completed_at = Some(chrono::Utc::now().to_rfc3339());
             s.last_error = Some(error);
@@ -168,7 +172,7 @@ impl ScanStatus {
     }
 
     pub fn to_json(&self) -> serde_json::Value {
-        let s = self.inner.lock().unwrap();
+        let s = self.lock();
         Self::build_json(&s)
     }
 }
