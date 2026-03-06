@@ -154,6 +154,7 @@ pub struct TvShowSummary {
     pub first_air_date: Option<String>,
     pub season_count: i32,
     pub episode_count: i32,
+    pub watched_count: i32,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

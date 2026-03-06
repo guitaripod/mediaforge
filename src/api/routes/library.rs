@@ -27,15 +27,26 @@ pub fn routes() -> Router<Arc<AppState>> {
         .route("/api/library/shows/{id}/next", get(next_episode))
         .route("/api/library/episodes/{id}", get(get_episode))
         .route("/api/library/continue", get(continue_watching))
+        .route("/api/library/ondeck", get(on_deck))
+        .route("/api/library/watched", get(recently_watched))
         .route("/api/library/recent", get(recent_items))
+        .route("/api/library/genres", get(list_genres))
+        .route("/api/library/random", get(random_item))
         .route("/api/library/search", get(search_library))
 }
 
 #[derive(Deserialize)]
-struct PaginationParams {
+struct ListParams {
+    per_page: Option<u32>,
+    sort: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct MovieListParams {
     page: Option<u32>,
     per_page: Option<u32>,
     sort: Option<String>,
+    genre: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -49,7 +60,7 @@ struct PaginatedResponse<T: Serialize> {
 
 async fn list_movies(
     State(state): State<Arc<AppState>>,
-    Query(params): Query<PaginationParams>,
+    Query(params): Query<MovieListParams>,
 ) -> AppResult<Json<PaginatedResponse<MediaSummary>>> {
     let page = params.page.unwrap_or(1).max(1);
     let per_page = params.per_page.unwrap_or(50).min(200);
@@ -65,36 +76,70 @@ async fn list_movies(
 
     let conn = state.db.conn();
 
-    let total: i64 = conn.query_row(
-        "SELECT COUNT(*) FROM media_items WHERE media_type = 'movie'",
-        [],
-        |row| row.get(0),
-    )?;
+    let (total, movies) = if let Some(ref genre) = params.genre {
+        let genre_pattern = format!("%{}%", genre);
+        let total: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM media_items WHERE media_type = 'movie' AND genres LIKE ?1",
+            [&genre_pattern],
+            |row| row.get(0),
+        )?;
 
-    let query = format!(
-        "SELECT id, title, year, poster_path, rating, duration_secs, video_width, video_height, hdr_format
-         FROM media_items WHERE media_type = 'movie' ORDER BY {} LIMIT ?1 OFFSET ?2",
-        order
-    );
+        let query = format!(
+            "SELECT id, title, year, poster_path, rating, duration_secs, video_width, video_height, hdr_format
+             FROM media_items WHERE media_type = 'movie' AND genres LIKE ?1 ORDER BY {} LIMIT ?2 OFFSET ?3",
+            order
+        );
+        let mut stmt = conn.prepare(&query)?;
+        let movies: Vec<MediaSummary> = stmt
+            .query_map(rusqlite::params![genre_pattern, per_page, offset], |row| {
+                Ok(MediaSummary {
+                    id: row.get(0)?,
+                    title: row.get(1)?,
+                    media_type: "movie".to_string(),
+                    year: row.get(2)?,
+                    poster_path: row.get(3)?,
+                    rating: row.get(4)?,
+                    duration_secs: row.get(5)?,
+                    video_width: row.get(6)?,
+                    video_height: row.get(7)?,
+                    hdr_format: row.get(8)?,
+                })
+            })?
+            .filter_map(|r| r.ok())
+            .collect();
+        (total, movies)
+    } else {
+        let total: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM media_items WHERE media_type = 'movie'",
+            [],
+            |row| row.get(0),
+        )?;
 
-    let mut stmt = conn.prepare(&query)?;
-    let movies: Vec<MediaSummary> = stmt
-        .query_map(rusqlite::params![per_page, offset], |row| {
-            Ok(MediaSummary {
-                id: row.get(0)?,
-                title: row.get(1)?,
-                media_type: "movie".to_string(),
-                year: row.get(2)?,
-                poster_path: row.get(3)?,
-                rating: row.get(4)?,
-                duration_secs: row.get(5)?,
-                video_width: row.get(6)?,
-                video_height: row.get(7)?,
-                hdr_format: row.get(8)?,
-            })
-        })?
-        .filter_map(|r| r.ok())
-        .collect();
+        let query = format!(
+            "SELECT id, title, year, poster_path, rating, duration_secs, video_width, video_height, hdr_format
+             FROM media_items WHERE media_type = 'movie' ORDER BY {} LIMIT ?1 OFFSET ?2",
+            order
+        );
+        let mut stmt = conn.prepare(&query)?;
+        let movies: Vec<MediaSummary> = stmt
+            .query_map(rusqlite::params![per_page, offset], |row| {
+                Ok(MediaSummary {
+                    id: row.get(0)?,
+                    title: row.get(1)?,
+                    media_type: "movie".to_string(),
+                    year: row.get(2)?,
+                    poster_path: row.get(3)?,
+                    rating: row.get(4)?,
+                    duration_secs: row.get(5)?,
+                    video_width: row.get(6)?,
+                    video_height: row.get(7)?,
+                    hdr_format: row.get(8)?,
+                })
+            })?
+            .filter_map(|r| r.ok())
+            .collect();
+        (total, movies)
+    };
 
     let total_pages = ((total as f64) / (per_page as f64)).ceil() as u32;
 
@@ -139,19 +184,31 @@ async fn get_movie(
 
 async fn list_shows(
     State(state): State<Arc<AppState>>,
+    Query(params): Query<ListParams>,
 ) -> AppResult<Json<Vec<TvShowSummary>>> {
     let conn = state.db.conn();
 
-    let mut stmt = conn.prepare(
+    let order = match params.sort.as_deref() {
+        Some("name") => "t.name ASC",
+        Some("added") => "t.added_at DESC",
+        Some("rating") => "t.rating DESC",
+        _ => "t.name ASC",
+    };
+
+    let query = format!(
         "SELECT t.id, t.name, t.poster_path, t.rating, t.first_air_date,
                 COUNT(DISTINCT m.season_number),
-                COUNT(m.id)
+                COUNT(m.id),
+                COALESCE(SUM(CASE WHEN p.is_watched = 1 THEN 1 ELSE 0 END), 0)
          FROM tv_shows t
          LEFT JOIN media_items m ON m.show_name = t.name AND m.media_type = 'episode'
+         LEFT JOIN playback_state p ON m.id = p.media_id
          GROUP BY t.id
-         ORDER BY t.name"
-    )?;
+         ORDER BY {}",
+        order
+    );
 
+    let mut stmt = conn.prepare(&query)?;
     let shows: Vec<TvShowSummary> = stmt
         .query_map([], |row| {
             Ok(TvShowSummary {
@@ -162,6 +219,7 @@ async fn list_shows(
                 first_air_date: row.get(4)?,
                 season_count: row.get(5)?,
                 episode_count: row.get(6)?,
+                watched_count: row.get(7)?,
             })
         })?
         .filter_map(|r| r.ok())
@@ -201,17 +259,20 @@ async fn get_show(
     match show {
         Some(show) => {
             let mut stmt = conn.prepare(
-                "SELECT season_number, COUNT(*) as episode_count
-                 FROM media_items
-                 WHERE show_name = ?1 AND media_type = 'episode' AND season_number IS NOT NULL
-                 GROUP BY season_number
-                 ORDER BY season_number"
+                "SELECT m.season_number, COUNT(*),
+                        COALESCE(SUM(CASE WHEN p.is_watched = 1 THEN 1 ELSE 0 END), 0)
+                 FROM media_items m
+                 LEFT JOIN playback_state p ON m.id = p.media_id
+                 WHERE m.show_name = ?1 AND m.media_type = 'episode' AND m.season_number IS NOT NULL
+                 GROUP BY m.season_number
+                 ORDER BY m.season_number"
             )?;
             let seasons: Vec<serde_json::Value> = stmt
                 .query_map([&show.name], |row| {
                     Ok(serde_json::json!({
                         "season_number": row.get::<_, i32>(0)?,
                         "episode_count": row.get::<_, i32>(1)?,
+                        "watched_count": row.get::<_, i32>(2)?,
                     }))
                 })?
                 .filter_map(|r| r.ok())
@@ -377,7 +438,7 @@ struct ContinueWatchingResponse {
 
 async fn continue_watching(
     State(state): State<Arc<AppState>>,
-    Query(params): Query<PaginationParams>,
+    Query(params): Query<ListParams>,
 ) -> AppResult<Json<ContinueWatchingResponse>> {
     let limit = params.per_page.unwrap_or(20).min(100);
     let conn = state.db.conn();
@@ -430,9 +491,101 @@ async fn continue_watching(
     Ok(Json(ContinueWatchingResponse { items, total }))
 }
 
+async fn on_deck(
+    State(state): State<Arc<AppState>>,
+    Query(params): Query<ListParams>,
+) -> AppResult<Json<Vec<serde_json::Value>>> {
+    let limit = params.per_page.unwrap_or(20).min(100);
+    let conn = state.db.conn();
+
+    let mut stmt = conn.prepare(
+        "SELECT t.id, t.name, t.poster_path,
+                next_ep.id, next_ep.season_number, next_ep.episode_number, next_ep.episode_title,
+                next_ep.duration_secs, COALESCE(p.position_secs, 0)
+         FROM tv_shows t
+         JOIN media_items next_ep ON next_ep.id = (
+             SELECT m.id FROM media_items m
+             LEFT JOIN playback_state ps ON m.id = ps.media_id
+             WHERE m.show_name = t.name AND m.media_type = 'episode'
+               AND m.season_number IS NOT NULL AND m.episode_number IS NOT NULL
+               AND COALESCE(ps.is_watched, 0) = 0
+             ORDER BY (CASE WHEN COALESCE(ps.position_secs, 0) > 0 THEN 0 ELSE 1 END),
+                      m.season_number ASC, m.episode_number ASC
+             LIMIT 1
+         )
+         LEFT JOIN playback_state p ON next_ep.id = p.media_id
+         WHERE EXISTS (
+             SELECT 1 FROM playback_state ps2
+             JOIN media_items m2 ON m2.id = ps2.media_id
+             WHERE m2.show_name = t.name AND m2.media_type = 'episode'
+               AND (ps2.is_watched = 1 OR ps2.position_secs > 0)
+         )
+         ORDER BY COALESCE(p.last_played_at, t.added_at) DESC
+         LIMIT ?1"
+    )?;
+
+    let items: Vec<serde_json::Value> = stmt
+        .query_map([limit], |row| {
+            Ok(serde_json::json!({
+                "show_id": row.get::<_, String>(0)?,
+                "show_name": row.get::<_, String>(1)?,
+                "poster_path": row.get::<_, Option<String>>(2)?,
+                "episode_id": row.get::<_, String>(3)?,
+                "season_number": row.get::<_, Option<i32>>(4)?,
+                "episode_number": row.get::<_, Option<i32>>(5)?,
+                "episode_title": row.get::<_, Option<String>>(6)?,
+                "duration_secs": row.get::<_, Option<f64>>(7)?,
+                "position_secs": row.get::<_, f64>(8)?,
+            }))
+        })?
+        .filter_map(|r| r.ok())
+        .collect();
+
+    Ok(Json(items))
+}
+
+async fn recently_watched(
+    State(state): State<Arc<AppState>>,
+    Query(params): Query<ListParams>,
+) -> AppResult<Json<Vec<MediaSummary>>> {
+    let limit = params.per_page.unwrap_or(20).min(100);
+    let conn = state.db.conn();
+
+    let mut stmt = conn.prepare(
+        "SELECT m.id, m.title, m.media_type, m.year, COALESCE(m.poster_path, t.poster_path),
+                m.rating, m.duration_secs, m.video_width, m.video_height, m.hdr_format
+         FROM playback_state p
+         JOIN media_items m ON m.id = p.media_id
+         LEFT JOIN tv_shows t ON m.show_name = t.name AND m.media_type = 'episode'
+         WHERE p.is_watched = 1
+         ORDER BY p.last_played_at DESC
+         LIMIT ?1"
+    )?;
+
+    let items: Vec<MediaSummary> = stmt
+        .query_map([limit], |row| {
+            Ok(MediaSummary {
+                id: row.get(0)?,
+                title: row.get(1)?,
+                media_type: row.get(2)?,
+                year: row.get(3)?,
+                poster_path: row.get(4)?,
+                rating: row.get(5)?,
+                duration_secs: row.get(6)?,
+                video_width: row.get(7)?,
+                video_height: row.get(8)?,
+                hdr_format: row.get(9)?,
+            })
+        })?
+        .filter_map(|r| r.ok())
+        .collect();
+
+    Ok(Json(items))
+}
+
 async fn recent_items(
     State(state): State<Arc<AppState>>,
-    Query(params): Query<PaginationParams>,
+    Query(params): Query<ListParams>,
 ) -> AppResult<Json<Vec<MediaSummary>>> {
     let limit = params.per_page.unwrap_or(20).min(100);
     let conn = state.db.conn();
@@ -487,6 +640,90 @@ struct SearchResult {
 #[derive(Deserialize)]
 struct SearchParams {
     q: String,
+}
+
+async fn list_genres(
+    State(state): State<Arc<AppState>>,
+) -> AppResult<Json<Vec<String>>> {
+    let conn = state.db.conn();
+    let mut stmt = conn.prepare(
+        "SELECT DISTINCT genres FROM media_items WHERE genres IS NOT NULL AND genres != ''"
+    )?;
+
+    let mut genre_set = std::collections::BTreeSet::new();
+    let rows: Vec<String> = stmt
+        .query_map([], |row| row.get(0))?
+        .filter_map(|r| r.ok())
+        .collect();
+
+    for genres_str in &rows {
+        for genre in genres_str.split(',') {
+            let trimmed = genre.trim();
+            if !trimmed.is_empty() {
+                genre_set.insert(trimmed.to_string());
+            }
+        }
+    }
+
+    Ok(Json(genre_set.into_iter().collect()))
+}
+
+#[derive(Deserialize)]
+struct RandomParams {
+    media_type: Option<String>,
+}
+
+async fn random_item(
+    State(state): State<Arc<AppState>>,
+    Query(params): Query<RandomParams>,
+) -> AppResult<Response> {
+    let conn = state.db.conn();
+
+    let query = match params.media_type.as_deref() {
+        Some("movie") =>
+            "SELECT id, title, media_type, year, poster_path, rating, duration_secs, video_width, video_height, hdr_format
+             FROM media_items WHERE media_type = 'movie' ORDER BY RANDOM() LIMIT 1",
+        Some("episode") =>
+            "SELECT id, title, media_type, year, poster_path, rating, duration_secs, video_width, video_height, hdr_format
+             FROM media_items WHERE media_type = 'episode' ORDER BY RANDOM() LIMIT 1",
+        Some("unwatched") =>
+            "SELECT m.id, m.title, m.media_type, m.year, COALESCE(m.poster_path, t.poster_path), m.rating, m.duration_secs, m.video_width, m.video_height, m.hdr_format
+             FROM media_items m
+             LEFT JOIN tv_shows t ON m.show_name = t.name AND m.media_type = 'episode'
+             LEFT JOIN playback_state p ON m.id = p.media_id
+             WHERE COALESCE(p.is_watched, 0) = 0
+             ORDER BY RANDOM() LIMIT 1",
+        None =>
+            "SELECT m.id, m.title, m.media_type, m.year, COALESCE(m.poster_path, t.poster_path), m.rating, m.duration_secs, m.video_width, m.video_height, m.hdr_format
+             FROM media_items m
+             LEFT JOIN tv_shows t ON m.show_name = t.name AND m.media_type = 'episode'
+             ORDER BY RANDOM() LIMIT 1",
+        Some(_) => {
+            return Ok((
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({ "error": "media_type must be 'movie', 'episode', or 'unwatched'" })),
+            ).into_response());
+        }
+    };
+
+    let item: Option<MediaSummary> = conn
+        .query_row(query, [], |row| {
+            Ok(MediaSummary {
+                id: row.get(0)?,
+                title: row.get(1)?,
+                media_type: row.get(2)?,
+                year: row.get(3)?,
+                poster_path: row.get(4)?,
+                rating: row.get(5)?,
+                duration_secs: row.get(6)?,
+                video_width: row.get(7)?,
+                video_height: row.get(8)?,
+                hdr_format: row.get(9)?,
+            })
+        })
+        .ok();
+
+    Ok(Json(item).into_response())
 }
 
 async fn search_library(

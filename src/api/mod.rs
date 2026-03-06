@@ -164,11 +164,15 @@ async fn api_index() -> Json<serde_json::Value> {
         "version": env!("CARGO_PKG_VERSION"),
         "endpoints": {
             "library": {
-                "movies": "/api/library/movies",
-                "shows": "/api/library/shows",
+                "movies": "/api/library/movies?page=1&per_page=50&sort={title|year|added|rating}&genre={genre}",
+                "shows": "/api/library/shows?sort={name|added|rating}",
                 "episodes": "/api/library/episodes/{id}",
                 "continue": "/api/library/continue",
+                "ondeck": "/api/library/ondeck",
+                "watched": "/api/library/watched",
                 "recent": "/api/library/recent",
+                "genres": "/api/library/genres",
+                "random": "/api/library/random?media_type={movie|episode|unwatched}",
                 "search": "/api/library/search?q={query}",
                 "next_episode": "/api/library/shows/{id}/next",
             },
