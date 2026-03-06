@@ -35,47 +35,41 @@ pub async fn run(
 ) {
     let (tx, mut rx) = mpsc::channel::<()>(16);
 
-    let watcher_tx = tx.clone();
     let watch_dirs = dirs.clone();
-    let _watcher = std::thread::spawn(move || {
-        let rt_tx = watcher_tx;
-        let mut watcher: RecommendedWatcher = match notify::recommended_watcher(
-            move |res: Result<notify::Event, notify::Error>| {
-                match res {
-                    Ok(event) => {
-                        let dominated = matches!(
-                            event.kind,
-                            EventKind::Create(_)
-                                | EventKind::Remove(_)
-                                | EventKind::Modify(notify::event::ModifyKind::Name(_))
-                        );
-                        if dominated && is_video_event(&event.paths) {
-                            debug!("File change detected: {:?}", event.paths);
-                            let _ = rt_tx.try_send(());
-                        }
+    let mut watcher: RecommendedWatcher = match notify::recommended_watcher(
+        move |res: Result<notify::Event, notify::Error>| {
+            match res {
+                Ok(event) => {
+                    let dominated = matches!(
+                        event.kind,
+                        EventKind::Create(_)
+                            | EventKind::Remove(_)
+                            | EventKind::Modify(notify::event::ModifyKind::Name(_))
+                    );
+                    if dominated && is_video_event(&event.paths) {
+                        debug!("File change detected: {:?}", event.paths);
+                        let _ = tx.try_send(());
                     }
-                    Err(e) => error!("File watcher error: {}", e),
                 }
-            },
-        ) {
-            Ok(w) => w,
-            Err(e) => {
-                error!("Failed to create file watcher: {}", e);
-                return;
+                Err(e) => error!("File watcher error: {}", e),
             }
-        };
+        },
+    ) {
+        Ok(w) => w,
+        Err(e) => {
+            error!("Failed to create file watcher: {}", e);
+            return;
+        }
+    };
 
-        for dir in &watch_dirs {
-            if dir.exists() {
-                match watcher.watch(dir, RecursiveMode::Recursive) {
-                    Ok(()) => info!("Watching directory: {}", dir.display()),
-                    Err(e) => warn!("Failed to watch {}: {}", dir.display(), e),
-                }
+    for dir in &watch_dirs {
+        if dir.exists() {
+            match watcher.watch(dir, RecursiveMode::Recursive) {
+                Ok(()) => info!("Watching directory: {}", dir.display()),
+                Err(e) => warn!("Failed to watch {}: {}", dir.display(), e),
             }
         }
-
-        std::thread::park();
-    });
+    }
 
     info!("File watcher started for {} directories", dirs.len());
 
@@ -118,4 +112,7 @@ pub async fn run(
             }
         }
     }
+
+    #[allow(unreachable_code)]
+    drop(watcher);
 }
