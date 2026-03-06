@@ -1,11 +1,18 @@
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Json, Response};
+use serde::Serialize;
 use tracing::error;
+use utoipa::ToSchema;
 
 pub type AppResult<T> = Result<T, AppError>;
 
 #[derive(Debug)]
 pub struct AppError(anyhow::Error);
+
+#[derive(Serialize, ToSchema)]
+pub struct ErrorResponse {
+    pub error: String,
+}
 
 impl IntoResponse for AppError {
     fn into_response(self) -> Response {

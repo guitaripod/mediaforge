@@ -1,4 +1,5 @@
 use serde::{Deserialize, Serialize};
+use utoipa::ToSchema;
 
 mod genres_as_vec {
     use serde::{self, Deserialize, Deserializer, Serializer};
@@ -25,7 +26,7 @@ mod genres_as_vec {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 pub struct MediaItem {
     pub id: String,
     pub title: String,
@@ -47,26 +48,24 @@ pub struct MediaItem {
     pub audio_channels: Option<i32>,
     #[serde(skip_serializing)]
     pub audio_bitrate: Option<i64>,
-    // TV
     pub show_name: Option<String>,
     pub season_number: Option<i32>,
     pub episode_number: Option<i32>,
     pub episode_title: Option<String>,
-    // TMDB
     pub tmdb_id: Option<i64>,
     pub overview: Option<String>,
     pub poster_path: Option<String>,
     pub backdrop_path: Option<String>,
     #[serde(with = "genres_as_vec")]
+    #[schema(value_type = Option<Vec<String>>)]
     pub genres: Option<String>,
     pub rating: Option<f64>,
     pub release_date: Option<String>,
-    // State
     pub added_at: String,
     pub updated_at: String,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, ToSchema)]
 #[serde(rename_all = "lowercase")]
 pub enum MediaType {
     Movie,
@@ -93,7 +92,7 @@ impl std::str::FromStr for MediaType {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 pub struct Subtitle {
     pub id: String,
     pub media_id: String,
@@ -107,7 +106,7 @@ pub struct Subtitle {
     pub is_external: bool,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 pub struct PlaybackState {
     pub media_id: String,
     pub position_secs: f64,
@@ -115,7 +114,7 @@ pub struct PlaybackState {
     pub last_played_at: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 pub struct TvShow {
     pub id: String,
     pub name: String,
@@ -124,14 +123,14 @@ pub struct TvShow {
     pub poster_path: Option<String>,
     pub backdrop_path: Option<String>,
     #[serde(with = "genres_as_vec")]
+    #[schema(value_type = Option<Vec<String>>)]
     pub genres: Option<String>,
     pub rating: Option<f64>,
     pub first_air_date: Option<String>,
     pub added_at: String,
 }
 
-/// Summary for library browsing
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 pub struct MediaSummary {
     pub id: String,
     pub title: String,
@@ -145,7 +144,7 @@ pub struct MediaSummary {
     pub hdr_format: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 pub struct TvShowSummary {
     pub id: String,
     pub name: String,
@@ -157,7 +156,7 @@ pub struct TvShowSummary {
     pub watched_count: i32,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 pub struct EpisodeSummary {
     pub id: String,
     pub season_number: Option<i32>,
@@ -168,8 +167,6 @@ pub struct EpisodeSummary {
     pub position_secs: f64,
 }
 
-/// Probe result from ffprobe
-#[derive(Debug, Clone)]
 pub struct ProbeResult {
     pub duration_secs: Option<f64>,
     pub video_codec: Option<String>,
@@ -204,7 +201,7 @@ pub struct AudioStream {
     pub title: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 pub struct AudioTrack {
     pub id: String,
     pub media_id: String,
@@ -217,7 +214,7 @@ pub struct AudioTrack {
     pub title: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 pub struct ActivityLogEntry {
     pub id: i64,
     pub media_id: String,
