@@ -149,21 +149,32 @@ tailscale ip -4
 
 | Method | Endpoint | Description |
 |--------|----------|-------------|
-| GET | `/api/library/movies` | List movies (paginated, sortable) |
+| GET | `/api/library/movies` | List movies (paginated, sortable, filterable) |
 | GET | `/api/library/movies/:id` | Movie detail with subtitles and playback state |
-| GET | `/api/library/shows` | List TV shows |
-| GET | `/api/library/shows/:id` | Show detail with season list |
-| GET | `/api/library/shows/:id/seasons/:num` | Episodes in a season |
+| GET | `/api/library/shows` | List TV shows (sortable, with watched counts) |
+| GET | `/api/library/shows/:id` | Show detail with season list and watched counts |
+| GET | `/api/library/shows/:id/seasons/:num` | Episodes in a season (with watched/progress state) |
 | GET | `/api/library/shows/:id/next` | Next unwatched episode for a show |
 | GET | `/api/library/episodes/:id` | Episode detail with subtitles and playback state |
 | GET | `/api/library/continue` | In-progress items (resume watching) |
+| GET | `/api/library/ondeck` | Up next across all shows (global on deck) |
+| GET | `/api/library/watched` | Recently completed items |
 | GET | `/api/library/recent` | Recently added items |
+| GET | `/api/library/genres` | List all genres |
+| GET | `/api/library/random` | Random media item |
 | GET | `/api/library/search?q=` | Search across all media |
 
 **Query parameters for `/api/library/movies`:**
 - `page` — page number (default: 1)
 - `per_page` — items per page (default: 50, max: 200)
 - `sort` — `title`, `year`, `added`, `rating`
+- `genre` — filter by genre name
+
+**Query parameters for `/api/library/shows`:**
+- `sort` — `name`, `added`, `rating`
+
+**Query parameters for `/api/library/random`:**
+- `media_type` — `movie`, `episode`, `unwatched` (default: any)
 
 ### Playback
 
