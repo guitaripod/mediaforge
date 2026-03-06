@@ -57,38 +57,8 @@ impl Scanner {
             info!("Scanning directory: {:?}", dir);
             total_new += self.scan_directory(dir).await?;
         }
-        self.prune_stale_entries()?;
+        prune_stale_entries(&self.db)?;
         Ok(total_new)
-    }
-
-    fn prune_stale_entries(&self) -> Result<()> {
-        let conn = self.db.conn();
-        let mut stmt = conn.prepare("SELECT id, file_path FROM media_items")?;
-        let stale: Vec<(String, String)> = stmt
-            .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?
-            .filter_map(|r| r.ok())
-            .filter(|(_, path): &(String, String)| !Path::new(path).exists())
-            .collect();
-
-        if stale.is_empty() {
-            return Ok(());
-        }
-
-        info!("Pruning {} stale entries (files no longer on disk)", stale.len());
-        for (id, path) in &stale {
-            conn.execute("DELETE FROM media_items WHERE id = ?1", [id])?;
-            debug!("Pruned stale entry: {}", path);
-        }
-
-        let orphan_shows = conn.execute(
-            "DELETE FROM tv_shows WHERE name NOT IN (SELECT DISTINCT show_name FROM media_items WHERE show_name IS NOT NULL)",
-            [],
-        )?;
-        if orphan_shows > 0 {
-            info!("Pruned {} orphan TV show entries", orphan_shows);
-        }
-
-        Ok(())
     }
 
     async fn scan_directory(&self, dir: &Path) -> Result<u32> {
@@ -322,6 +292,36 @@ impl Scanner {
         tx.commit()?;
         Ok(())
     }
+}
+
+pub fn prune_stale_entries(db: &Database) -> Result<()> {
+    let conn = db.conn();
+    let mut stmt = conn.prepare("SELECT id, file_path FROM media_items")?;
+    let stale: Vec<(String, String)> = stmt
+        .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?
+        .filter_map(|r| r.ok())
+        .filter(|(_, path): &(String, String)| !Path::new(path).exists())
+        .collect();
+
+    if stale.is_empty() {
+        return Ok(());
+    }
+
+    info!("Pruning {} stale entries (files no longer on disk)", stale.len());
+    for (id, path) in &stale {
+        conn.execute("DELETE FROM media_items WHERE id = ?1", [id])?;
+        debug!("Pruned stale entry: {}", path);
+    }
+
+    let orphan_shows = conn.execute(
+        "DELETE FROM tv_shows WHERE name NOT IN (SELECT DISTINCT show_name FROM media_items WHERE show_name IS NOT NULL)",
+        [],
+    )?;
+    if orphan_shows > 0 {
+        info!("Pruned {} orphan TV show entries", orphan_shows);
+    }
+
+    Ok(())
 }
 
 #[derive(Debug)]

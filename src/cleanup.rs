@@ -6,6 +6,7 @@ use tracing::{debug, error, info};
 use crate::config::CleanupConfig;
 use crate::db::Database;
 use crate::hls::HlsManager;
+use crate::scanner;
 
 pub async fn run(config: CleanupConfig, hls: HlsManager, db: Database, cache_dir: std::path::PathBuf) {
     let interval = Duration::from_secs(config.interval_secs);
@@ -47,6 +48,10 @@ pub async fn run(config: CleanupConfig, hls: HlsManager, db: Database, cache_dir
             }
             Err(e) => error!("Activity log cleanup failed: {}", e),
             _ => {}
+        }
+
+        if let Err(e) = scanner::prune_stale_entries(&db) {
+            error!("Orphan cleanup failed: {}", e);
         }
 
         if total > 0 {
