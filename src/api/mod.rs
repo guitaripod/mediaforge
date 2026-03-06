@@ -175,6 +175,8 @@ async fn api_index() -> Json<serde_json::Value> {
             "playback": {
                 "state": "/api/playback/{id}/state",
                 "watched": "/api/playback/{id}/watched",
+                "show_watched": "/api/playback/shows/{id}/watched",
+                "season_watched": "/api/playback/shows/{id}/seasons/{num}/watched",
                 "history": "/api/playback/history?media_id={id}&limit=50&offset=0",
             },
             "streaming": {

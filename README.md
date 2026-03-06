@@ -173,6 +173,10 @@ tailscale ip -4
 | PUT | `/api/playback/:id/state` | Update position (`{ "position_secs": 120.5, "event": "play" }`) |
 | POST | `/api/playback/:id/watched` | Mark as watched |
 | DELETE | `/api/playback/:id/watched` | Mark as unwatched |
+| POST | `/api/playback/shows/:id/watched` | Mark all episodes watched |
+| DELETE | `/api/playback/shows/:id/watched` | Mark all episodes unwatched |
+| POST | `/api/playback/shows/:id/seasons/:num/watched` | Mark season watched |
+| DELETE | `/api/playback/shows/:id/seasons/:num/watched` | Mark season unwatched |
 | GET | `/api/playback/history` | Activity log (`?media_id=&limit=50&offset=0`) |
 
 ### Streaming
