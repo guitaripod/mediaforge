@@ -470,6 +470,29 @@ assert d['position_secs'] == 0
 
 test_endpoint POST "/api/playback/nonexistent-id-000/watched" 404 "mark nonexistent watched"
 test_endpoint DELETE "/api/playback/nonexistent-id-000/watched" 404 "mark nonexistent unwatched"
+
+MOVIE_DURATION=$(curl -s "${BASE}/api/stream/${MOVIE_ID}/info" | python3 -c "import sys,json; print(json.load(sys.stdin)['duration_secs'])")
+AUTO_WATCH_POS=$(python3 -c "print(round(${MOVIE_DURATION} * 0.95, 1))")
+echo "   Testing auto-watched at 95% (${AUTO_WATCH_POS}s of ${MOVIE_DURATION}s)"
+test_endpoint PUT "/api/playback/${MOVIE_ID}/state" 204 "set position to 95% of duration" "{\"position_secs\": ${AUTO_WATCH_POS}}"
+test_endpoint GET "/api/playback/${MOVIE_ID}/state" 200 "get state after 95% position"
+assert_body "auto-marked watched at 95%" "
+import sys,json; d=json.load(sys.stdin)
+assert d['is_watched'] == True, f'expected is_watched=True, got {d[\"is_watched\"]}'
+assert d['position_secs'] == ${AUTO_WATCH_POS}
+"
+
+test_endpoint DELETE "/api/playback/${MOVIE_ID}/watched" 204 "reset after auto-watched test"
+
+BELOW_THRESHOLD=$(python3 -c "print(round(${MOVIE_DURATION} * 0.5, 1))")
+test_endpoint PUT "/api/playback/${MOVIE_ID}/state" 204 "set position to 50% of duration" "{\"position_secs\": ${BELOW_THRESHOLD}}"
+test_endpoint GET "/api/playback/${MOVIE_ID}/state" 200 "get state after 50% position"
+assert_body "NOT auto-marked watched at 50%" "
+import sys,json; d=json.load(sys.stdin)
+assert d['is_watched'] == False, f'expected is_watched=False at 50%'
+"
+
+test_endpoint DELETE "/api/playback/${MOVIE_ID}/watched" 204 "reset after below-threshold test"
 echo ""
 
 # ── Batch Watched/Unwatched ─────────────────────────────────────────────────

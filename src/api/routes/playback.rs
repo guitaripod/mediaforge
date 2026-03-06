@@ -82,14 +82,37 @@ async fn update_playback(
     if !media_exists(&conn, &id) {
         return Ok((StatusCode::NOT_FOUND, Json(serde_json::json!({ "error": "Not found" }))).into_response());
     }
-    conn.execute(
-        "INSERT INTO playback_state (media_id, position_secs, last_played_at)
-         VALUES (?1, ?2, datetime('now'))
-         ON CONFLICT(media_id) DO UPDATE SET position_secs = ?2, last_played_at = datetime('now')",
-        rusqlite::params![id, body.position_secs],
-    )?;
+    let duration: Option<f64> = conn
+        .query_row(
+            "SELECT duration_secs FROM media_items WHERE id = ?1",
+            [&id],
+            |row| row.get(0),
+        )
+        .unwrap_or(None);
 
-    if event_type == "position_update" {
+    let auto_watched = duration
+        .filter(|&d| d > 0.0)
+        .is_some_and(|d| body.position_secs / d >= 0.9);
+
+    if auto_watched {
+        conn.execute(
+            "INSERT INTO playback_state (media_id, position_secs, is_watched, last_played_at)
+             VALUES (?1, ?2, 1, datetime('now'))
+             ON CONFLICT(media_id) DO UPDATE SET position_secs = ?2, is_watched = 1, last_played_at = datetime('now')",
+            rusqlite::params![id, body.position_secs],
+        )?;
+    } else {
+        conn.execute(
+            "INSERT INTO playback_state (media_id, position_secs, last_played_at)
+             VALUES (?1, ?2, datetime('now'))
+             ON CONFLICT(media_id) DO UPDATE SET position_secs = ?2, last_played_at = datetime('now')",
+            rusqlite::params![id, body.position_secs],
+        )?;
+    }
+
+    let log_event = if auto_watched { "complete" } else { event_type };
+
+    if log_event == "position_update" {
         conn.execute(
             "INSERT INTO activity_log (media_id, event_type, position_secs)
              SELECT ?1, ?2, ?3
@@ -98,12 +121,12 @@ async fn update_playback(
                  WHERE media_id = ?1 AND event_type = 'position_update'
                    AND created_at > datetime('now', '-30 seconds')
              )",
-            rusqlite::params![id, event_type, body.position_secs],
+            rusqlite::params![id, log_event, body.position_secs],
         )?;
     } else {
         conn.execute(
             "INSERT INTO activity_log (media_id, event_type, position_secs) VALUES (?1, ?2, ?3)",
-            rusqlite::params![id, event_type, body.position_secs],
+            rusqlite::params![id, log_event, body.position_secs],
         )?;
     }
 
