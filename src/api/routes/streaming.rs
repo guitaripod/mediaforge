@@ -482,6 +482,10 @@ async fn direct_stream(
 }
 
 fn parse_range(range: &str, file_size: u64) -> Result<(u64, u64), StatusCode> {
+    if file_size == 0 {
+        return Err(StatusCode::RANGE_NOT_SATISFIABLE);
+    }
+
     let range = range
         .strip_prefix("bytes=")
         .ok_or(StatusCode::RANGE_NOT_SATISFIABLE)?;
@@ -807,6 +811,18 @@ mod tests {
     fn range_missing_prefix_fails() {
         assert_eq!(
             parse_range("0-999", 10000).unwrap_err(),
+            StatusCode::RANGE_NOT_SATISFIABLE
+        );
+    }
+
+    #[test]
+    fn range_zero_size_file_fails() {
+        assert_eq!(
+            parse_range("bytes=0-0", 0).unwrap_err(),
+            StatusCode::RANGE_NOT_SATISFIABLE
+        );
+        assert_eq!(
+            parse_range("bytes=-1", 0).unwrap_err(),
             StatusCode::RANGE_NOT_SATISFIABLE
         );
     }
