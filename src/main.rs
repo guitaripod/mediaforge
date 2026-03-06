@@ -6,6 +6,7 @@ mod ffmpeg;
 mod hls;
 mod metadata;
 mod scanner;
+mod watcher;
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -139,6 +140,13 @@ async fn run_server(config: Config) -> anyhow::Result<()> {
     let cleanup_db = db.clone();
     let cleanup_cache_dir = config.transcoding.cache_dir.clone();
     tokio::spawn(cleanup::run(cleanup_config, cleanup_hls, cleanup_db, cleanup_cache_dir));
+
+    let watch_dirs = config.library.media_dirs.clone();
+    let watch_db = db.clone();
+    let watch_ffmpeg = ffmpeg.clone();
+    let watch_tmdb = tmdb.clone();
+    let watch_status = scan_status.clone();
+    tokio::spawn(watcher::run(watch_dirs, watch_db, watch_ffmpeg, watch_tmdb, watch_status));
 
     let addr = format!("{}:{}", config.server.host, config.server.port);
     let listener = TcpListener::bind(&addr).await?;

@@ -47,6 +47,7 @@ dirs = "6"
 
 # CLI
 clap = { version = "4", features = ["derive"] }
+notify = { version = "8.2.0", features = ["macos_kqueue"] }
 
 [dev-dependencies]
 tempfile = "3"
