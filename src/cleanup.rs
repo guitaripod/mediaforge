@@ -54,6 +54,30 @@ pub async fn run(config: CleanupConfig, hls: HlsManager, db: Database, cache_dir
             error!("Orphan cleanup failed: {}", e);
         }
 
+        match conn.execute(
+            "DELETE FROM subtitles WHERE media_id NOT IN (SELECT id FROM media_items)",
+            [],
+        ) {
+            Ok(n) if n > 0 => {
+                info!("Pruned {} orphaned subtitle entries", n);
+                total += n as u64;
+            }
+            Err(e) => error!("Orphan subtitle cleanup failed: {}", e),
+            _ => {}
+        }
+
+        match conn.execute(
+            "DELETE FROM audio_tracks WHERE media_id NOT IN (SELECT id FROM media_items)",
+            [],
+        ) {
+            Ok(n) if n > 0 => {
+                info!("Pruned {} orphaned audio track entries", n);
+                total += n as u64;
+            }
+            Err(e) => error!("Orphan audio track cleanup failed: {}", e),
+            _ => {}
+        }
+
         if total > 0 {
             info!("Cleanup complete: {} items removed", total);
         }

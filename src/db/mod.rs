@@ -124,6 +124,7 @@ impl Database {
             CREATE INDEX IF NOT EXISTS idx_tmdb_id ON media_items(tmdb_id);
             CREATE INDEX IF NOT EXISTS idx_added_at ON media_items(added_at);
             CREATE INDEX IF NOT EXISTS idx_sort_title ON media_items(sort_title);
+            CREATE INDEX IF NOT EXISTS idx_genres ON media_items(genres);
             CREATE INDEX IF NOT EXISTS idx_subtitles_media ON subtitles(media_id);
             CREATE INDEX IF NOT EXISTS idx_audio_tracks_media ON audio_tracks(media_id);
             CREATE INDEX IF NOT EXISTS idx_activity_media ON activity_log(media_id);
