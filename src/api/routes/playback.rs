@@ -12,6 +12,15 @@ use crate::api::helpers::get_playback_state;
 use crate::api::AppState;
 use crate::db::models::{ActivityLogEntry, PlaybackState};
 
+fn media_exists(conn: &rusqlite::Connection, id: &str) -> bool {
+    conn.query_row(
+        "SELECT 1 FROM media_items WHERE id = ?1",
+        [id],
+        |_| Ok(()),
+    )
+    .is_ok()
+}
+
 pub fn routes() -> Router<Arc<AppState>> {
     Router::new()
         .route("/api/playback/{id}/state", get(get_playback).put(update_playback))
@@ -22,15 +31,19 @@ pub fn routes() -> Router<Arc<AppState>> {
 async fn get_playback(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
-) -> AppResult<Json<PlaybackState>> {
+) -> AppResult<Response> {
     let conn = state.db.conn();
+    if !media_exists(&conn, &id) {
+        return Ok((StatusCode::NOT_FOUND, Json(serde_json::json!({ "error": "Not found" }))).into_response());
+    }
     let ps = get_playback_state(&conn, &id)?;
     Ok(Json(ps.unwrap_or(PlaybackState {
         media_id: id,
         position_secs: 0.0,
         is_watched: false,
         last_played_at: None,
-    })))
+    }))
+    .into_response())
 }
 
 #[derive(Deserialize)]
@@ -52,6 +65,9 @@ async fn update_playback(
     }
 
     let conn = state.db.conn();
+    if !media_exists(&conn, &id) {
+        return Ok((StatusCode::NOT_FOUND, Json(serde_json::json!({ "error": "Not found" }))).into_response());
+    }
     conn.execute(
         "INSERT INTO playback_state (media_id, position_secs, last_played_at)
          VALUES (?1, ?2, datetime('now'))
@@ -95,8 +111,11 @@ async fn update_playback(
 async fn mark_watched(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
-) -> AppResult<StatusCode> {
+) -> AppResult<Response> {
     let conn = state.db.conn();
+    if !media_exists(&conn, &id) {
+        return Ok((StatusCode::NOT_FOUND, Json(serde_json::json!({ "error": "Not found" }))).into_response());
+    }
     conn.execute(
         "INSERT INTO playback_state (media_id, is_watched, last_played_at)
          VALUES (?1, 1, datetime('now'))
@@ -107,7 +126,7 @@ async fn mark_watched(
         "INSERT INTO activity_log (media_id, event_type, position_secs) VALUES (?1, 'complete', 0)",
         [&id],
     )?;
-    Ok(StatusCode::NO_CONTENT)
+    Ok(StatusCode::NO_CONTENT.into_response())
 }
 
 #[derive(Deserialize)]
@@ -193,13 +212,16 @@ async fn get_activity_history(
 async fn mark_unwatched(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
-) -> AppResult<StatusCode> {
+) -> AppResult<Response> {
     let conn = state.db.conn();
+    if !media_exists(&conn, &id) {
+        return Ok((StatusCode::NOT_FOUND, Json(serde_json::json!({ "error": "Not found" }))).into_response());
+    }
     conn.execute(
         "INSERT INTO playback_state (media_id, is_watched, position_secs, last_played_at)
          VALUES (?1, 0, 0, datetime('now'))
          ON CONFLICT(media_id) DO UPDATE SET is_watched = 0, position_secs = 0, last_played_at = datetime('now')",
         [&id],
     )?;
-    Ok(StatusCode::NO_CONTENT)
+    Ok(StatusCode::NO_CONTENT.into_response())
 }
