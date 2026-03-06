@@ -68,7 +68,17 @@ impl Scanner {
         for entry in WalkDir::new(dir)
             .follow_links(true)
             .into_iter()
-            .filter_map(|e| e.ok())
+            .filter_map(|e| match e {
+                Ok(entry) => Some(entry),
+                Err(err) => {
+                    if err.loop_ancestor().is_some() {
+                        warn!("Symlink cycle detected, skipping: {}", err);
+                    } else {
+                        warn!("Directory walk error: {}", err);
+                    }
+                    None
+                }
+            })
         {
             let path = entry.path();
             if !path.is_file() || is_macos_resource_fork(path) {
