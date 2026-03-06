@@ -25,6 +25,8 @@ pub fn routes() -> Router<Arc<AppState>> {
     Router::new()
         .route("/api/playback/{id}/state", get(get_playback).put(update_playback))
         .route("/api/playback/{id}/watched", axum::routing::post(mark_watched).delete(mark_unwatched))
+        .route("/api/playback/shows/{id}/watched", axum::routing::post(mark_show_watched).delete(mark_show_unwatched))
+        .route("/api/playback/shows/{id}/seasons/{season}/watched", axum::routing::post(mark_season_watched).delete(mark_season_unwatched))
         .route("/api/playback/history", get(get_activity_history))
 }
 
@@ -117,9 +119,9 @@ async fn mark_watched(
         return Ok((StatusCode::NOT_FOUND, Json(serde_json::json!({ "error": "Not found" }))).into_response());
     }
     conn.execute(
-        "INSERT INTO playback_state (media_id, is_watched, last_played_at)
-         VALUES (?1, 1, datetime('now'))
-         ON CONFLICT(media_id) DO UPDATE SET is_watched = 1, last_played_at = datetime('now')",
+        "INSERT INTO playback_state (media_id, is_watched, position_secs, last_played_at)
+         VALUES (?1, 1, 0, datetime('now'))
+         ON CONFLICT(media_id) DO UPDATE SET is_watched = 1, position_secs = 0, last_played_at = datetime('now')",
         [&id],
     )?;
     conn.execute(
@@ -224,4 +226,76 @@ async fn mark_unwatched(
         [&id],
     )?;
     Ok(StatusCode::NO_CONTENT.into_response())
+}
+
+fn show_name_for_id(conn: &rusqlite::Connection, show_id: &str) -> Option<String> {
+    conn.query_row("SELECT name FROM tv_shows WHERE id = ?1", [show_id], |row| row.get(0)).ok()
+}
+
+async fn mark_show_watched(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> AppResult<Response> {
+    let conn = state.db.conn();
+    let Some(show_name) = show_name_for_id(&conn, &id) else {
+        return Ok((StatusCode::NOT_FOUND, Json(serde_json::json!({ "error": "Show not found" }))).into_response());
+    };
+    let count = conn.execute(
+        "INSERT INTO playback_state (media_id, is_watched, position_secs, last_played_at)
+         SELECT id, 1, 0, datetime('now') FROM media_items WHERE show_name = ?1 AND media_type = 'episode'
+         ON CONFLICT(media_id) DO UPDATE SET is_watched = 1, position_secs = 0, last_played_at = datetime('now')",
+        [&show_name],
+    )?;
+    Ok(Json(serde_json::json!({ "updated": count })).into_response())
+}
+
+async fn mark_show_unwatched(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> AppResult<Response> {
+    let conn = state.db.conn();
+    let Some(show_name) = show_name_for_id(&conn, &id) else {
+        return Ok((StatusCode::NOT_FOUND, Json(serde_json::json!({ "error": "Show not found" }))).into_response());
+    };
+    let count = conn.execute(
+        "INSERT INTO playback_state (media_id, is_watched, position_secs, last_played_at)
+         SELECT id, 0, 0, datetime('now') FROM media_items WHERE show_name = ?1 AND media_type = 'episode'
+         ON CONFLICT(media_id) DO UPDATE SET is_watched = 0, position_secs = 0, last_played_at = datetime('now')",
+        [&show_name],
+    )?;
+    Ok(Json(serde_json::json!({ "updated": count })).into_response())
+}
+
+async fn mark_season_watched(
+    State(state): State<Arc<AppState>>,
+    Path((id, season)): Path<(String, i32)>,
+) -> AppResult<Response> {
+    let conn = state.db.conn();
+    let Some(show_name) = show_name_for_id(&conn, &id) else {
+        return Ok((StatusCode::NOT_FOUND, Json(serde_json::json!({ "error": "Show not found" }))).into_response());
+    };
+    let count = conn.execute(
+        "INSERT INTO playback_state (media_id, is_watched, position_secs, last_played_at)
+         SELECT id, 1, 0, datetime('now') FROM media_items WHERE show_name = ?1 AND media_type = 'episode' AND season_number = ?2
+         ON CONFLICT(media_id) DO UPDATE SET is_watched = 1, position_secs = 0, last_played_at = datetime('now')",
+        rusqlite::params![show_name, season],
+    )?;
+    Ok(Json(serde_json::json!({ "updated": count })).into_response())
+}
+
+async fn mark_season_unwatched(
+    State(state): State<Arc<AppState>>,
+    Path((id, season)): Path<(String, i32)>,
+) -> AppResult<Response> {
+    let conn = state.db.conn();
+    let Some(show_name) = show_name_for_id(&conn, &id) else {
+        return Ok((StatusCode::NOT_FOUND, Json(serde_json::json!({ "error": "Show not found" }))).into_response());
+    };
+    let count = conn.execute(
+        "INSERT INTO playback_state (media_id, is_watched, position_secs, last_played_at)
+         SELECT id, 0, 0, datetime('now') FROM media_items WHERE show_name = ?1 AND media_type = 'episode' AND season_number = ?2
+         ON CONFLICT(media_id) DO UPDATE SET is_watched = 0, position_secs = 0, last_played_at = datetime('now')",
+        rusqlite::params![show_name, season],
+    )?;
+    Ok(Json(serde_json::json!({ "updated": count })).into_response())
 }
