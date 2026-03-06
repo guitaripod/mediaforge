@@ -23,7 +23,14 @@ pub fn routes() -> Router<Arc<AppState>> {
         .route("/api/metadata/image/{*path}", get(proxy_image))
 }
 
-async fn trigger_scan(State(state): State<Arc<AppState>>) -> AppResult<Json<serde_json::Value>> {
+async fn trigger_scan(State(state): State<Arc<AppState>>) -> AppResult<Response> {
+    if state.scan_status.is_running() {
+        return Ok((
+            StatusCode::CONFLICT,
+            Json(serde_json::json!({ "error": "Scan already in progress" })),
+        ).into_response());
+    }
+
     let db = state.db.clone();
     let ffmpeg = state.ffmpeg.clone();
     let tmdb = state.tmdb.clone();
@@ -57,12 +64,26 @@ async fn trigger_scan(State(state): State<Arc<AppState>>) -> AppResult<Json<serd
         }
     });
 
-    Ok(Json(serde_json::json!({ "status": "scan_started" })))
+    Ok(Json(serde_json::json!({ "status": "scan_started" })).into_response())
 }
 
 async fn trigger_refresh(
     State(state): State<Arc<AppState>>,
-) -> AppResult<Json<serde_json::Value>> {
+) -> AppResult<Response> {
+    if state.scan_status.is_running() {
+        return Ok((
+            StatusCode::CONFLICT,
+            Json(serde_json::json!({ "error": "Scan already in progress" })),
+        ).into_response());
+    }
+
+    if !state.tmdb.has_key() {
+        return Ok((
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({ "error": "No TMDB API key configured" })),
+        ).into_response());
+    }
+
     let tmdb = state.tmdb.clone();
     let db = state.db.clone();
     let status = state.scan_status.clone();
@@ -81,7 +102,7 @@ async fn trigger_refresh(
         status.finish();
     });
 
-    Ok(Json(serde_json::json!({ "status": "refresh_started" })))
+    Ok(Json(serde_json::json!({ "status": "refresh_started" })).into_response())
 }
 
 const VALID_IMAGE_SIZES: &[&str] = &[

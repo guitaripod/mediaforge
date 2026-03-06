@@ -59,6 +59,11 @@ impl ScanStatus {
         self.tx.subscribe()
     }
 
+    pub fn is_running(&self) -> bool {
+        let s = self.inner.lock().unwrap();
+        !matches!(s.current, ScanPhase::Idle)
+    }
+
     pub fn start_scan(&self) {
         let snapshot = {
             let mut s = self.inner.lock().unwrap();
