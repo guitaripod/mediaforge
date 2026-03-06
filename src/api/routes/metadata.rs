@@ -4,25 +4,40 @@ use axum::body::Body;
 use axum::extract::{Path, Query, State};
 use axum::http::{header, StatusCode};
 use axum::response::{IntoResponse, Json, Response};
-use axum::routing::{get, post};
-use axum::Router;
-use serde::Deserialize;
+use axum::routing::get;
+use serde::{Deserialize, Serialize};
 use tokio::sync::broadcast;
 use tokio_util::io::ReaderStream;
 use tracing::error;
+use utoipa::ToSchema;
+use utoipa_axum::{router::OpenApiRouter, routes};
 
 use crate::api::error::AppResult;
 use crate::api::AppState;
 use crate::metadata::TmdbClient;
 use crate::scanner::Scanner;
 
-pub fn routes() -> Router<Arc<AppState>> {
-    Router::new()
-        .route("/api/metadata/scan", post(trigger_scan))
-        .route("/api/metadata/refresh", post(trigger_refresh))
+#[derive(Serialize, ToSchema)]
+pub struct StatusMessage {
+    pub status: String,
+}
+
+pub fn routes() -> OpenApiRouter<Arc<AppState>> {
+    OpenApiRouter::new()
+        .routes(routes!(trigger_scan))
+        .routes(routes!(trigger_refresh))
         .route("/api/metadata/image/{*path}", get(proxy_image))
 }
 
+#[utoipa::path(
+    post,
+    path = "/api/metadata/scan",
+    tag = "metadata",
+    responses(
+        (status = 200, body = StatusMessage),
+        (status = 409, body = crate::api::error::ErrorResponse),
+    )
+)]
 async fn trigger_scan(State(state): State<Arc<AppState>>) -> AppResult<Response> {
     if state.scan_status.is_running() {
         return Ok((
@@ -67,6 +82,16 @@ async fn trigger_scan(State(state): State<Arc<AppState>>) -> AppResult<Response>
     Ok(Json(serde_json::json!({ "status": "scan_started" })).into_response())
 }
 
+#[utoipa::path(
+    post,
+    path = "/api/metadata/refresh",
+    tag = "metadata",
+    responses(
+        (status = 200, body = StatusMessage),
+        (status = 400, body = crate::api::error::ErrorResponse),
+        (status = 409, body = crate::api::error::ErrorResponse),
+    )
+)]
 async fn trigger_refresh(
     State(state): State<Arc<AppState>>,
 ) -> AppResult<Response> {
@@ -109,7 +134,7 @@ const VALID_IMAGE_SIZES: &[&str] = &[
     "w92", "w154", "w185", "w342", "w500", "w780", "original",
 ];
 
-#[derive(Deserialize)]
+#[derive(Deserialize, utoipa::IntoParams)]
 struct ImageQuery {
     #[serde(default = "default_image_size")]
     size: String,

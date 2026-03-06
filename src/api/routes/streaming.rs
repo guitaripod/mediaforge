@@ -4,13 +4,13 @@ use axum::body::Body;
 use axum::extract::{Path, State};
 use axum::http::{header, HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Json, Response};
-use axum::routing::{get, post};
-use axum::Router;
 use regex::Regex;
 use serde::{Deserialize, Serialize};
 use tokio::io::AsyncSeekExt;
 use tokio_util::io::ReaderStream;
 use tracing::error;
+use utoipa::ToSchema;
+use utoipa_axum::{router::OpenApiRouter, routes};
 
 use crate::api::error::AppResult;
 use crate::api::helpers::{get_audio_tracks_for_media, get_subtitles_for_media};
@@ -25,22 +25,22 @@ static HLS_SEGMENT_RE: LazyLock<Regex> =
 static HLS_VARIANT_RE: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"^(720p|360p|original)$").unwrap());
 
-pub fn routes() -> Router<Arc<AppState>> {
-    Router::new()
-        .route("/api/stream/{id}/info", get(stream_info))
-        .route("/api/stream/{id}/hls/prepare", post(hls_prepare))
-        .route("/api/stream/{id}/hls/cancel", post(hls_cancel))
-        .route("/api/stream/{id}/hls/status", get(hls_status))
-        .route("/api/stream/{id}/hls/master.m3u8", get(hls_master))
-        .route("/api/stream/{id}/hls/{variant}/playlist.m3u8", get(hls_variant_playlist))
-        .route("/api/stream/{id}/hls/{variant}/{segment}", get(hls_segment))
-        .route("/api/stream/{id}/direct", get(direct_stream))
-        .route("/api/stream/{id}/sprites/sprites.vtt", get(serve_sprite_vtt))
-        .route("/api/stream/{id}/sprites/sprites.jpg", get(serve_sprite_image))
-        .route("/api/stream/{id}/subtitle/{sub_id}", get(serve_subtitle))
+pub fn routes() -> OpenApiRouter<Arc<AppState>> {
+    OpenApiRouter::new()
+        .routes(routes!(stream_info))
+        .routes(routes!(hls_prepare))
+        .routes(routes!(hls_cancel))
+        .routes(routes!(hls_status))
+        .routes(routes!(hls_master))
+        .routes(routes!(hls_variant_playlist))
+        .routes(routes!(hls_segment))
+        .routes(routes!(direct_stream))
+        .routes(routes!(serve_sprite_vtt))
+        .routes(routes!(serve_sprite_image))
+        .routes(routes!(serve_subtitle))
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, ToSchema)]
 struct StreamInfo {
     id: String,
     video_codec: Option<String>,
@@ -69,6 +69,28 @@ struct StreamInfoRow {
     file_path: String,
 }
 
+#[derive(Serialize, ToSchema)]
+struct HlsStatusResponse {
+    status: String,
+    progress: Option<f32>,
+    error: Option<String>,
+}
+
+#[derive(Serialize, ToSchema)]
+struct StatusMessage {
+    status: String,
+}
+
+#[utoipa::path(
+    get,
+    path = "/api/stream/{id}/info",
+    tag = "streaming",
+    params(("id" = String, Path, description = "Media item ID")),
+    responses(
+        (status = 200, body = StreamInfo),
+        (status = 404, body = crate::api::error::ErrorResponse),
+    )
+)]
 async fn stream_info(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
@@ -135,12 +157,24 @@ async fn stream_info(
     .into_response())
 }
 
-#[derive(Deserialize, Default)]
+#[derive(Deserialize, Default, ToSchema)]
 struct HlsPrepareRequest {
     audio_track_id: Option<String>,
     start_secs: Option<f64>,
 }
 
+#[utoipa::path(
+    post,
+    path = "/api/stream/{id}/hls/prepare",
+    tag = "streaming",
+    params(("id" = String, Path, description = "Media item ID")),
+    request_body = HlsPrepareRequest,
+    responses(
+        (status = 200, body = StatusMessage),
+        (status = 400, body = crate::api::error::ErrorResponse),
+        (status = 404, body = crate::api::error::ErrorResponse),
+    )
+)]
 async fn hls_prepare(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
@@ -216,6 +250,15 @@ async fn hls_prepare(
     Ok(Json(serde_json::json!({ "status": "preparing" })).into_response())
 }
 
+#[utoipa::path(
+    post,
+    path = "/api/stream/{id}/hls/cancel",
+    tag = "streaming",
+    params(("id" = String, Path, description = "Media item ID")),
+    responses(
+        (status = 200, body = StatusMessage),
+    )
+)]
 async fn hls_cancel(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
@@ -224,6 +267,16 @@ async fn hls_cancel(
     Ok(Json(serde_json::json!({ "status": "cancelled" })))
 }
 
+#[utoipa::path(
+    get,
+    path = "/api/stream/{id}/hls/status",
+    tag = "streaming",
+    params(("id" = String, Path, description = "Media item ID")),
+    responses(
+        (status = 200, body = HlsStatusResponse),
+        (status = 404, body = crate::api::error::ErrorResponse),
+    )
+)]
 async fn hls_status(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
@@ -250,6 +303,16 @@ async fn hls_status(
     .into_response())
 }
 
+#[utoipa::path(
+    get,
+    path = "/api/stream/{id}/hls/master.m3u8",
+    tag = "streaming",
+    params(("id" = String, Path, description = "Media item ID")),
+    responses(
+        (status = 200, content_type = "application/vnd.apple.mpegurl", body = String),
+        (status = 404, body = crate::api::error::ErrorResponse),
+    )
+)]
 async fn hls_master(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
@@ -266,6 +329,20 @@ async fn hls_master(
         .into_response())
 }
 
+#[utoipa::path(
+    get,
+    path = "/api/stream/{id}/hls/{variant}/playlist.m3u8",
+    tag = "streaming",
+    params(
+        ("id" = String, Path, description = "Media item ID"),
+        ("variant" = String, Path, description = "HLS variant (720p, 360p, original)"),
+    ),
+    responses(
+        (status = 200, content_type = "application/vnd.apple.mpegurl", body = String),
+        (status = 400, body = crate::api::error::ErrorResponse),
+        (status = 404, body = crate::api::error::ErrorResponse),
+    )
+)]
 async fn hls_variant_playlist(
     State(state): State<Arc<AppState>>,
     Path((id, variant)): Path<(String, String)>,
@@ -286,6 +363,21 @@ async fn hls_variant_playlist(
         .into_response())
 }
 
+#[utoipa::path(
+    get,
+    path = "/api/stream/{id}/hls/{variant}/{segment}",
+    tag = "streaming",
+    params(
+        ("id" = String, Path, description = "Media item ID"),
+        ("variant" = String, Path, description = "HLS variant (720p, 360p, original)"),
+        ("segment" = String, Path, description = "Segment filename (e.g. segment_0000.ts)"),
+    ),
+    responses(
+        (status = 200, content_type = "video/mp2t"),
+        (status = 400, body = crate::api::error::ErrorResponse),
+        (status = 404, body = crate::api::error::ErrorResponse),
+    )
+)]
 async fn hls_segment(
     State(state): State<Arc<AppState>>,
     Path((id, variant, segment)): Path<(String, String, String)>,
@@ -310,6 +402,18 @@ async fn hls_segment(
         .unwrap())
 }
 
+#[utoipa::path(
+    get,
+    path = "/api/stream/{id}/direct",
+    tag = "streaming",
+    params(("id" = String, Path, description = "Media item ID")),
+    responses(
+        (status = 200, content_type = "application/octet-stream"),
+        (status = 206, content_type = "application/octet-stream"),
+        (status = 404, body = crate::api::error::ErrorResponse),
+        (status = 416, body = crate::api::error::ErrorResponse),
+    )
+)]
 async fn direct_stream(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
@@ -416,6 +520,20 @@ fn parse_range(range: &str, file_size: u64) -> Result<(u64, u64), StatusCode> {
     Ok((start, end))
 }
 
+#[utoipa::path(
+    get,
+    path = "/api/stream/{id}/subtitle/{sub_id}",
+    tag = "streaming",
+    params(
+        ("id" = String, Path, description = "Media item ID"),
+        ("sub_id" = String, Path, description = "Subtitle ID"),
+    ),
+    responses(
+        (status = 200, content_type = "text/vtt", body = String),
+        (status = 404, body = crate::api::error::ErrorResponse),
+        (status = 422, body = crate::api::error::ErrorResponse),
+    )
+)]
 async fn serve_subtitle(
     State(state): State<Arc<AppState>>,
     Path((id, sub_id)): Path<(String, String)>,
@@ -519,6 +637,16 @@ async fn serve_subtitle(
     Ok((StatusCode::NOT_FOUND, Json(serde_json::json!({ "error": "Not found" }))).into_response())
 }
 
+#[utoipa::path(
+    get,
+    path = "/api/stream/{id}/sprites/sprites.vtt",
+    tag = "streaming",
+    params(("id" = String, Path, description = "Media item ID")),
+    responses(
+        (status = 200, content_type = "text/vtt", body = String),
+        (status = 404, body = crate::api::error::ErrorResponse),
+    )
+)]
 async fn serve_sprite_vtt(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
@@ -538,6 +666,16 @@ async fn serve_sprite_vtt(
     Ok(([(header::CONTENT_TYPE, "text/vtt")], content).into_response())
 }
 
+#[utoipa::path(
+    get,
+    path = "/api/stream/{id}/sprites/sprites.jpg",
+    tag = "streaming",
+    params(("id" = String, Path, description = "Media item ID")),
+    responses(
+        (status = 200, content_type = "image/jpeg"),
+        (status = 404, body = crate::api::error::ErrorResponse),
+    )
+)]
 async fn serve_sprite_image(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,

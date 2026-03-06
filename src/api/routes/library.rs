@@ -3,46 +3,43 @@ use std::sync::Arc;
 use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Json, Response};
-use axum::routing::get;
-use axum::Router;
 use serde::{Deserialize, Serialize};
+use utoipa::ToSchema;
+use utoipa_axum::{router::OpenApiRouter, routes};
 
 const MAX_SEARCH_LENGTH: usize = 200;
 
 use crate::api::error::AppResult;
 use crate::api::helpers::{get_audio_tracks_for_media, get_playback_state, get_subtitles_for_media, media_item_from_row, MEDIA_ITEM_COLUMNS};
 use crate::api::AppState;
-use crate::db::models::{EpisodeSummary, MediaItem, MediaSummary, TvShow, TvShowSummary};
+use crate::db::models::{AudioTrack, EpisodeSummary, MediaItem, MediaSummary, PlaybackState, Subtitle, TvShow, TvShowSummary};
 
-pub fn routes() -> Router<Arc<AppState>> {
-    Router::new()
-        .route("/api/library/movies", get(list_movies))
-        .route("/api/library/movies/{id}", get(get_movie))
-        .route("/api/library/shows", get(list_shows))
-        .route("/api/library/shows/{id}", get(get_show))
-        .route(
-            "/api/library/shows/{id}/seasons/{season}",
-            get(get_season_episodes),
-        )
-        .route("/api/library/shows/{id}/next", get(next_episode))
-        .route("/api/library/episodes/{id}", get(get_episode))
-        .route("/api/library/continue", get(continue_watching))
-        .route("/api/library/ondeck", get(on_deck))
-        .route("/api/library/watched", get(recently_watched))
-        .route("/api/library/recent", get(recent_items))
-        .route("/api/library/genres", get(list_genres))
-        .route("/api/library/random", get(random_item))
-        .route("/api/library/search", get(search_library))
+pub fn routes() -> OpenApiRouter<Arc<AppState>> {
+    OpenApiRouter::new()
+        .routes(routes!(list_movies))
+        .routes(routes!(get_movie))
+        .routes(routes!(list_shows))
+        .routes(routes!(get_show))
+        .routes(routes!(get_season_episodes))
+        .routes(routes!(next_episode))
+        .routes(routes!(get_episode))
+        .routes(routes!(continue_watching))
+        .routes(routes!(on_deck))
+        .routes(routes!(recently_watched))
+        .routes(routes!(recent_items))
+        .routes(routes!(list_genres))
+        .routes(routes!(random_item))
+        .routes(routes!(search_library))
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, utoipa::IntoParams)]
 struct ListParams {
     page: Option<u32>,
     per_page: Option<u32>,
     sort: Option<String>,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, utoipa::IntoParams)]
 struct MovieListParams {
     page: Option<u32>,
     per_page: Option<u32>,
@@ -59,6 +56,118 @@ struct PaginatedResponse<T: Serialize> {
     total_pages: u32,
 }
 
+#[derive(Serialize, ToSchema)]
+struct PaginatedMediaSummary {
+    items: Vec<MediaSummary>,
+    total: i64,
+    page: u32,
+    per_page: u32,
+    total_pages: u32,
+}
+
+#[derive(Serialize, ToSchema)]
+struct PaginatedTvShowSummary {
+    items: Vec<TvShowSummary>,
+    total: i64,
+    page: u32,
+    per_page: u32,
+    total_pages: u32,
+}
+
+#[derive(Serialize, ToSchema)]
+struct MediaDetailResponse {
+    item: MediaItem,
+    subtitles: Vec<Subtitle>,
+    playback: Option<PlaybackState>,
+    audio_tracks: Vec<AudioTrack>,
+}
+
+#[derive(Serialize, ToSchema)]
+struct ShowDetailResponse {
+    show: TvShow,
+    seasons: Vec<SeasonSummary>,
+}
+
+#[derive(Serialize, ToSchema)]
+struct SeasonSummary {
+    season_number: i32,
+    episode_count: i32,
+    watched_count: i32,
+}
+
+#[derive(Serialize, ToSchema)]
+struct OnDeckItem {
+    show_id: String,
+    show_name: String,
+    poster_path: Option<String>,
+    episode_id: String,
+    season_number: Option<i32>,
+    episode_number: Option<i32>,
+    episode_title: Option<String>,
+    duration_secs: Option<f64>,
+    position_secs: f64,
+}
+
+#[derive(Serialize, ToSchema)]
+struct ContinueWatchingItem {
+    id: String,
+    title: String,
+    media_type: String,
+    poster_path: Option<String>,
+    duration_secs: Option<f64>,
+    position_secs: f64,
+    progress_percent: Option<f64>,
+    last_played_at: String,
+    show_name: Option<String>,
+    season_number: Option<i32>,
+    episode_number: Option<i32>,
+    episode_title: Option<String>,
+}
+
+#[derive(Serialize, ToSchema)]
+struct ContinueWatchingResponse {
+    items: Vec<ContinueWatchingItem>,
+    total: i64,
+}
+
+#[derive(Serialize, ToSchema)]
+struct SearchResult {
+    id: String,
+    title: String,
+    media_type: String,
+    year: Option<i32>,
+    poster_path: Option<String>,
+    rating: Option<f64>,
+    duration_secs: Option<f64>,
+    video_width: Option<i32>,
+    video_height: Option<i32>,
+    hdr_format: Option<String>,
+    show_name: Option<String>,
+    season_number: Option<i32>,
+    episode_number: Option<i32>,
+    episode_title: Option<String>,
+}
+
+#[derive(Deserialize, utoipa::IntoParams)]
+struct SearchParams {
+    q: String,
+}
+
+#[derive(Deserialize, utoipa::IntoParams)]
+struct RandomParams {
+    media_type: Option<String>,
+}
+
+#[utoipa::path(
+    get,
+    path = "/api/library/movies",
+    tag = "library",
+    params(MovieListParams),
+    responses(
+        (status = 200, body = PaginatedMediaSummary),
+        (status = 500, body = crate::api::error::ErrorResponse),
+    ),
+)]
 async fn list_movies(
     State(state): State<Arc<AppState>>,
     Query(params): Query<MovieListParams>,
@@ -153,6 +262,17 @@ async fn list_movies(
     }))
 }
 
+#[utoipa::path(
+    get,
+    path = "/api/library/movies/{id}",
+    tag = "library",
+    params(("id" = String, Path, description = "Media item ID")),
+    responses(
+        (status = 200, body = MediaDetailResponse),
+        (status = 404, body = crate::api::error::ErrorResponse),
+        (status = 500, body = crate::api::error::ErrorResponse),
+    ),
+)]
 async fn get_movie(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
@@ -170,12 +290,12 @@ async fn get_movie(
             let playback = get_playback_state(&conn, &movie.id)?;
             let audio_tracks = get_audio_tracks_for_media(&conn, &movie.id)?;
 
-            Ok(Json(serde_json::json!({
-                "item": movie,
-                "subtitles": subtitles,
-                "playback": playback,
-                "audio_tracks": audio_tracks,
-            }))
+            Ok(Json(MediaDetailResponse {
+                item: movie,
+                subtitles,
+                playback,
+                audio_tracks,
+            })
             .into_response())
         }
         None => Ok((StatusCode::NOT_FOUND, Json(serde_json::json!({ "error": "Not found" })))
@@ -183,6 +303,16 @@ async fn get_movie(
     }
 }
 
+#[utoipa::path(
+    get,
+    path = "/api/library/shows",
+    tag = "library",
+    params(ListParams),
+    responses(
+        (status = 200, body = PaginatedTvShowSummary),
+        (status = 500, body = crate::api::error::ErrorResponse),
+    ),
+)]
 async fn list_shows(
     State(state): State<Arc<AppState>>,
     Query(params): Query<ListParams>,
@@ -246,6 +376,17 @@ async fn list_shows(
     }))
 }
 
+#[utoipa::path(
+    get,
+    path = "/api/library/shows/{id}",
+    tag = "library",
+    params(("id" = String, Path, description = "TV show ID")),
+    responses(
+        (status = 200, body = ShowDetailResponse),
+        (status = 404, body = crate::api::error::ErrorResponse),
+        (status = 500, body = crate::api::error::ErrorResponse),
+    ),
+)]
 async fn get_show(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
@@ -285,21 +426,21 @@ async fn get_show(
                  GROUP BY m.season_number
                  ORDER BY m.season_number"
             )?;
-            let seasons: Vec<serde_json::Value> = stmt
+            let seasons: Vec<SeasonSummary> = stmt
                 .query_map([&show.name], |row| {
-                    Ok(serde_json::json!({
-                        "season_number": row.get::<_, i32>(0)?,
-                        "episode_count": row.get::<_, i32>(1)?,
-                        "watched_count": row.get::<_, i32>(2)?,
-                    }))
+                    Ok(SeasonSummary {
+                        season_number: row.get(0)?,
+                        episode_count: row.get(1)?,
+                        watched_count: row.get(2)?,
+                    })
                 })?
                 .filter_map(|r| r.ok())
                 .collect();
 
-            Ok(Json(serde_json::json!({
-                "show": show,
-                "seasons": seasons,
-            }))
+            Ok(Json(ShowDetailResponse {
+                show,
+                seasons,
+            })
             .into_response())
         }
         None => Ok((StatusCode::NOT_FOUND, Json(serde_json::json!({ "error": "Not found" })))
@@ -307,6 +448,20 @@ async fn get_show(
     }
 }
 
+#[utoipa::path(
+    get,
+    path = "/api/library/shows/{id}/seasons/{season}",
+    tag = "library",
+    params(
+        ("id" = String, Path, description = "TV show ID"),
+        ("season" = i32, Path, description = "Season number"),
+    ),
+    responses(
+        (status = 200, body = Vec<EpisodeSummary>),
+        (status = 404, body = crate::api::error::ErrorResponse),
+        (status = 500, body = crate::api::error::ErrorResponse),
+    ),
+)]
 async fn get_season_episodes(
     State(state): State<Arc<AppState>>,
     Path((id, season)): Path<(String, i32)>,
@@ -353,6 +508,17 @@ async fn get_season_episodes(
     Ok(Json(episodes).into_response())
 }
 
+#[utoipa::path(
+    get,
+    path = "/api/library/shows/{id}/next",
+    tag = "library",
+    params(("id" = String, Path, description = "TV show ID")),
+    responses(
+        (status = 200, body = Option<EpisodeSummary>),
+        (status = 404, body = crate::api::error::ErrorResponse),
+        (status = 500, body = crate::api::error::ErrorResponse),
+    ),
+)]
 async fn next_episode(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
@@ -402,6 +568,17 @@ async fn next_episode(
     Ok(Json(next).into_response())
 }
 
+#[utoipa::path(
+    get,
+    path = "/api/library/episodes/{id}",
+    tag = "library",
+    params(("id" = String, Path, description = "Media item ID")),
+    responses(
+        (status = 200, body = MediaDetailResponse),
+        (status = 404, body = crate::api::error::ErrorResponse),
+        (status = 500, body = crate::api::error::ErrorResponse),
+    ),
+)]
 async fn get_episode(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
@@ -419,12 +596,12 @@ async fn get_episode(
             let playback = get_playback_state(&conn, &episode.id)?;
             let audio_tracks = get_audio_tracks_for_media(&conn, &episode.id)?;
 
-            Ok(Json(serde_json::json!({
-                "item": episode,
-                "subtitles": subtitles,
-                "playback": playback,
-                "audio_tracks": audio_tracks,
-            }))
+            Ok(Json(MediaDetailResponse {
+                item: episode,
+                subtitles,
+                playback,
+                audio_tracks,
+            })
             .into_response())
         }
         None => Ok((StatusCode::NOT_FOUND, Json(serde_json::json!({ "error": "Not found" })))
@@ -432,28 +609,16 @@ async fn get_episode(
     }
 }
 
-#[derive(Serialize)]
-struct ContinueWatchingItem {
-    id: String,
-    title: String,
-    media_type: String,
-    poster_path: Option<String>,
-    duration_secs: Option<f64>,
-    position_secs: f64,
-    progress_percent: Option<f64>,
-    last_played_at: String,
-    show_name: Option<String>,
-    season_number: Option<i32>,
-    episode_number: Option<i32>,
-    episode_title: Option<String>,
-}
-
-#[derive(Serialize)]
-struct ContinueWatchingResponse {
-    items: Vec<ContinueWatchingItem>,
-    total: i64,
-}
-
+#[utoipa::path(
+    get,
+    path = "/api/library/continue",
+    tag = "library",
+    params(ListParams),
+    responses(
+        (status = 200, body = ContinueWatchingResponse),
+        (status = 500, body = crate::api::error::ErrorResponse),
+    ),
+)]
 async fn continue_watching(
     State(state): State<Arc<AppState>>,
     Query(params): Query<ListParams>,
@@ -509,10 +674,20 @@ async fn continue_watching(
     Ok(Json(ContinueWatchingResponse { items, total }))
 }
 
+#[utoipa::path(
+    get,
+    path = "/api/library/ondeck",
+    tag = "library",
+    params(ListParams),
+    responses(
+        (status = 200, body = Vec<OnDeckItem>),
+        (status = 500, body = crate::api::error::ErrorResponse),
+    ),
+)]
 async fn on_deck(
     State(state): State<Arc<AppState>>,
     Query(params): Query<ListParams>,
-) -> AppResult<Json<Vec<serde_json::Value>>> {
+) -> AppResult<Json<Vec<OnDeckItem>>> {
     let limit = params.per_page.unwrap_or(20).min(100);
     let conn = state.db.conn();
 
@@ -542,19 +717,19 @@ async fn on_deck(
          LIMIT ?1"
     )?;
 
-    let items: Vec<serde_json::Value> = stmt
+    let items: Vec<OnDeckItem> = stmt
         .query_map([limit], |row| {
-            Ok(serde_json::json!({
-                "show_id": row.get::<_, String>(0)?,
-                "show_name": row.get::<_, String>(1)?,
-                "poster_path": row.get::<_, Option<String>>(2)?,
-                "episode_id": row.get::<_, String>(3)?,
-                "season_number": row.get::<_, Option<i32>>(4)?,
-                "episode_number": row.get::<_, Option<i32>>(5)?,
-                "episode_title": row.get::<_, Option<String>>(6)?,
-                "duration_secs": row.get::<_, Option<f64>>(7)?,
-                "position_secs": row.get::<_, f64>(8)?,
-            }))
+            Ok(OnDeckItem {
+                show_id: row.get(0)?,
+                show_name: row.get(1)?,
+                poster_path: row.get(2)?,
+                episode_id: row.get(3)?,
+                season_number: row.get(4)?,
+                episode_number: row.get(5)?,
+                episode_title: row.get(6)?,
+                duration_secs: row.get(7)?,
+                position_secs: row.get(8)?,
+            })
         })?
         .filter_map(|r| r.ok())
         .collect();
@@ -562,6 +737,16 @@ async fn on_deck(
     Ok(Json(items))
 }
 
+#[utoipa::path(
+    get,
+    path = "/api/library/watched",
+    tag = "library",
+    params(ListParams),
+    responses(
+        (status = 200, body = Vec<MediaSummary>),
+        (status = 500, body = crate::api::error::ErrorResponse),
+    ),
+)]
 async fn recently_watched(
     State(state): State<Arc<AppState>>,
     Query(params): Query<ListParams>,
@@ -601,6 +786,16 @@ async fn recently_watched(
     Ok(Json(items))
 }
 
+#[utoipa::path(
+    get,
+    path = "/api/library/recent",
+    tag = "library",
+    params(ListParams),
+    responses(
+        (status = 200, body = Vec<MediaSummary>),
+        (status = 500, body = crate::api::error::ErrorResponse),
+    ),
+)]
 async fn recent_items(
     State(state): State<Arc<AppState>>,
     Query(params): Query<ListParams>,
@@ -637,29 +832,15 @@ async fn recent_items(
     Ok(Json(items))
 }
 
-#[derive(Serialize)]
-struct SearchResult {
-    id: String,
-    title: String,
-    media_type: String,
-    year: Option<i32>,
-    poster_path: Option<String>,
-    rating: Option<f64>,
-    duration_secs: Option<f64>,
-    video_width: Option<i32>,
-    video_height: Option<i32>,
-    hdr_format: Option<String>,
-    show_name: Option<String>,
-    season_number: Option<i32>,
-    episode_number: Option<i32>,
-    episode_title: Option<String>,
-}
-
-#[derive(Deserialize)]
-struct SearchParams {
-    q: String,
-}
-
+#[utoipa::path(
+    get,
+    path = "/api/library/genres",
+    tag = "library",
+    responses(
+        (status = 200, body = Vec<String>),
+        (status = 500, body = crate::api::error::ErrorResponse),
+    ),
+)]
 async fn list_genres(
     State(state): State<Arc<AppState>>,
 ) -> AppResult<Json<Vec<String>>> {
@@ -686,11 +867,17 @@ async fn list_genres(
     Ok(Json(genre_set.into_iter().collect()))
 }
 
-#[derive(Deserialize)]
-struct RandomParams {
-    media_type: Option<String>,
-}
-
+#[utoipa::path(
+    get,
+    path = "/api/library/random",
+    tag = "library",
+    params(RandomParams),
+    responses(
+        (status = 200, body = Option<MediaSummary>),
+        (status = 400, body = crate::api::error::ErrorResponse),
+        (status = 500, body = crate::api::error::ErrorResponse),
+    ),
+)]
 async fn random_item(
     State(state): State<Arc<AppState>>,
     Query(params): Query<RandomParams>,
@@ -744,6 +931,17 @@ async fn random_item(
     Ok(Json(item).into_response())
 }
 
+#[utoipa::path(
+    get,
+    path = "/api/library/search",
+    tag = "library",
+    params(SearchParams),
+    responses(
+        (status = 200, body = Vec<SearchResult>),
+        (status = 400, body = crate::api::error::ErrorResponse),
+        (status = 500, body = crate::api::error::ErrorResponse),
+    ),
+)]
 async fn search_library(
     State(state): State<Arc<AppState>>,
     Query(params): Query<SearchParams>,

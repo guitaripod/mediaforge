@@ -3,9 +3,9 @@ use std::sync::Arc;
 use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Json, Response};
-use axum::routing::get;
-use axum::Router;
 use serde::{Deserialize, Serialize};
+use utoipa::ToSchema;
+use utoipa_axum::{router::OpenApiRouter, routes};
 
 use crate::api::error::AppResult;
 use crate::api::helpers::get_playback_state;
@@ -21,15 +21,30 @@ fn media_exists(conn: &rusqlite::Connection, id: &str) -> bool {
     .is_ok()
 }
 
-pub fn routes() -> Router<Arc<AppState>> {
-    Router::new()
-        .route("/api/playback/{id}/state", get(get_playback).put(update_playback))
-        .route("/api/playback/{id}/watched", axum::routing::post(mark_watched).delete(mark_unwatched))
-        .route("/api/playback/shows/{id}/watched", axum::routing::post(mark_show_watched).delete(mark_show_unwatched))
-        .route("/api/playback/shows/{id}/seasons/{season}/watched", axum::routing::post(mark_season_watched).delete(mark_season_unwatched))
-        .route("/api/playback/history", get(get_activity_history))
+#[derive(Serialize, ToSchema)]
+struct UpdatedCount {
+    updated: usize,
 }
 
+pub fn routes() -> OpenApiRouter<Arc<AppState>> {
+    OpenApiRouter::new()
+        .routes(routes!(get_playback, update_playback))
+        .routes(routes!(mark_watched, mark_unwatched))
+        .routes(routes!(mark_show_watched, mark_show_unwatched))
+        .routes(routes!(mark_season_watched, mark_season_unwatched))
+        .routes(routes!(get_activity_history))
+}
+
+#[utoipa::path(
+    get,
+    path = "/api/playback/{id}/state",
+    tag = "playback",
+    params(("id" = String, Path, description = "Media item ID")),
+    responses(
+        (status = 200, description = "Playback state", body = PlaybackState),
+        (status = 404, description = "Not found", body = crate::api::error::ErrorResponse),
+    )
+)]
 async fn get_playback(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
@@ -48,12 +63,24 @@ async fn get_playback(
     .into_response())
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, ToSchema)]
 struct UpdatePlaybackRequest {
     position_secs: f64,
     event: Option<String>,
 }
 
+#[utoipa::path(
+    put,
+    path = "/api/playback/{id}/state",
+    tag = "playback",
+    params(("id" = String, Path, description = "Media item ID")),
+    request_body = UpdatePlaybackRequest,
+    responses(
+        (status = 204, description = "Playback state updated"),
+        (status = 400, description = "Invalid request", body = crate::api::error::ErrorResponse),
+        (status = 404, description = "Not found", body = crate::api::error::ErrorResponse),
+    )
+)]
 async fn update_playback(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
@@ -133,6 +160,16 @@ async fn update_playback(
     Ok(StatusCode::NO_CONTENT.into_response())
 }
 
+#[utoipa::path(
+    post,
+    path = "/api/playback/{id}/watched",
+    tag = "playback",
+    params(("id" = String, Path, description = "Media item ID")),
+    responses(
+        (status = 204, description = "Marked as watched"),
+        (status = 404, description = "Not found", body = crate::api::error::ErrorResponse),
+    )
+)]
 async fn mark_watched(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
@@ -154,14 +191,41 @@ async fn mark_watched(
     Ok(StatusCode::NO_CONTENT.into_response())
 }
 
-#[derive(Deserialize)]
+#[utoipa::path(
+    delete,
+    path = "/api/playback/{id}/watched",
+    tag = "playback",
+    params(("id" = String, Path, description = "Media item ID")),
+    responses(
+        (status = 204, description = "Marked as unwatched"),
+        (status = 404, description = "Not found", body = crate::api::error::ErrorResponse),
+    )
+)]
+async fn mark_unwatched(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> AppResult<Response> {
+    let conn = state.db.conn();
+    if !media_exists(&conn, &id) {
+        return Ok((StatusCode::NOT_FOUND, Json(serde_json::json!({ "error": "Not found" }))).into_response());
+    }
+    conn.execute(
+        "INSERT INTO playback_state (media_id, is_watched, position_secs, last_played_at)
+         VALUES (?1, 0, 0, datetime('now'))
+         ON CONFLICT(media_id) DO UPDATE SET is_watched = 0, position_secs = 0, last_played_at = datetime('now')",
+        [&id],
+    )?;
+    Ok(StatusCode::NO_CONTENT.into_response())
+}
+
+#[derive(Deserialize, ToSchema, utoipa::IntoParams)]
 struct HistoryParams {
     media_id: Option<String>,
     limit: Option<u32>,
     offset: Option<u32>,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, ToSchema)]
 struct HistoryResponse {
     entries: Vec<ActivityLogEntry>,
     total: i64,
@@ -169,6 +233,15 @@ struct HistoryResponse {
     offset: u32,
 }
 
+#[utoipa::path(
+    get,
+    path = "/api/playback/history",
+    tag = "playback",
+    params(HistoryParams),
+    responses(
+        (status = 200, description = "Activity history", body = HistoryResponse),
+    )
+)]
 async fn get_activity_history(
     State(state): State<Arc<AppState>>,
     Query(params): Query<HistoryParams>,
@@ -234,27 +307,20 @@ async fn get_activity_history(
     }))
 }
 
-async fn mark_unwatched(
-    State(state): State<Arc<AppState>>,
-    Path(id): Path<String>,
-) -> AppResult<Response> {
-    let conn = state.db.conn();
-    if !media_exists(&conn, &id) {
-        return Ok((StatusCode::NOT_FOUND, Json(serde_json::json!({ "error": "Not found" }))).into_response());
-    }
-    conn.execute(
-        "INSERT INTO playback_state (media_id, is_watched, position_secs, last_played_at)
-         VALUES (?1, 0, 0, datetime('now'))
-         ON CONFLICT(media_id) DO UPDATE SET is_watched = 0, position_secs = 0, last_played_at = datetime('now')",
-        [&id],
-    )?;
-    Ok(StatusCode::NO_CONTENT.into_response())
-}
-
 fn show_name_for_id(conn: &rusqlite::Connection, show_id: &str) -> Option<String> {
     conn.query_row("SELECT name FROM tv_shows WHERE id = ?1", [show_id], |row| row.get(0)).ok()
 }
 
+#[utoipa::path(
+    post,
+    path = "/api/playback/shows/{id}/watched",
+    tag = "playback",
+    params(("id" = String, Path, description = "TV show ID")),
+    responses(
+        (status = 200, description = "All episodes marked as watched", body = UpdatedCount),
+        (status = 404, description = "Show not found", body = crate::api::error::ErrorResponse),
+    )
+)]
 async fn mark_show_watched(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
@@ -272,6 +338,16 @@ async fn mark_show_watched(
     Ok(Json(serde_json::json!({ "updated": count })).into_response())
 }
 
+#[utoipa::path(
+    delete,
+    path = "/api/playback/shows/{id}/watched",
+    tag = "playback",
+    params(("id" = String, Path, description = "TV show ID")),
+    responses(
+        (status = 200, description = "All episodes marked as unwatched", body = UpdatedCount),
+        (status = 404, description = "Show not found", body = crate::api::error::ErrorResponse),
+    )
+)]
 async fn mark_show_unwatched(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
@@ -289,6 +365,19 @@ async fn mark_show_unwatched(
     Ok(Json(serde_json::json!({ "updated": count })).into_response())
 }
 
+#[utoipa::path(
+    post,
+    path = "/api/playback/shows/{id}/seasons/{season}/watched",
+    tag = "playback",
+    params(
+        ("id" = String, Path, description = "TV show ID"),
+        ("season" = i32, Path, description = "Season number"),
+    ),
+    responses(
+        (status = 200, description = "Season episodes marked as watched", body = UpdatedCount),
+        (status = 404, description = "Show not found", body = crate::api::error::ErrorResponse),
+    )
+)]
 async fn mark_season_watched(
     State(state): State<Arc<AppState>>,
     Path((id, season)): Path<(String, i32)>,
@@ -306,6 +395,19 @@ async fn mark_season_watched(
     Ok(Json(serde_json::json!({ "updated": count })).into_response())
 }
 
+#[utoipa::path(
+    delete,
+    path = "/api/playback/shows/{id}/seasons/{season}/watched",
+    tag = "playback",
+    params(
+        ("id" = String, Path, description = "TV show ID"),
+        ("season" = i32, Path, description = "Season number"),
+    ),
+    responses(
+        (status = 200, description = "Season episodes marked as unwatched", body = UpdatedCount),
+        (status = 404, description = "Show not found", body = crate::api::error::ErrorResponse),
+    )
+)]
 async fn mark_season_unwatched(
     State(state): State<Arc<AppState>>,
     Path((id, season)): Path<(String, i32)>,

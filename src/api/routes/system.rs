@@ -4,21 +4,56 @@ use axum::extract::State;
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 use axum::response::{Json, Response};
 use axum::routing::get;
-use axum::Router;
+use serde::Serialize;
 use tracing::debug;
+use utoipa::ToSchema;
+use utoipa_axum::{router::OpenApiRouter, routes};
 
 use crate::api::error::AppResult;
 use crate::api::AppState;
 
-pub fn routes() -> Router<Arc<AppState>> {
-    Router::new()
-        .route("/api/system/health", get(health))
-        .route("/api/system/stats", get(stats))
-        .route("/api/system/config", get(get_config))
-        .route("/api/system/scan-status", get(scan_status))
+#[derive(Serialize, ToSchema)]
+pub struct HealthResponse {
+    pub status: String,
+    pub version: String,
+}
+
+#[derive(Serialize, ToSchema)]
+pub struct StatsResponse {
+    pub movies: i64,
+    pub episodes: i64,
+    pub shows: i64,
+    pub total_size_bytes: i64,
+    pub total_duration_secs: f64,
+}
+
+#[derive(Serialize, ToSchema)]
+pub struct ScanStatusResponse {
+    pub status: String,
+    pub is_running: bool,
+    pub started_at: Option<String>,
+    pub items_found: Option<u32>,
+    pub last_completed_at: Option<String>,
+    pub last_error: Option<String>,
+}
+
+pub fn routes() -> OpenApiRouter<Arc<AppState>> {
+    OpenApiRouter::new()
+        .routes(routes!(health))
+        .routes(routes!(stats))
+        .routes(routes!(get_config))
+        .routes(routes!(scan_status))
         .route("/api/system/ws", get(scan_status_ws))
 }
 
+#[utoipa::path(
+    get,
+    path = "/api/system/health",
+    tag = "system",
+    responses(
+        (status = 200, body = HealthResponse),
+    ),
+)]
 async fn health() -> Json<serde_json::Value> {
     Json(serde_json::json!({
         "status": "ok",
@@ -26,6 +61,15 @@ async fn health() -> Json<serde_json::Value> {
     }))
 }
 
+#[utoipa::path(
+    get,
+    path = "/api/system/stats",
+    tag = "system",
+    responses(
+        (status = 200, body = StatsResponse),
+        (status = 500, body = crate::api::error::ErrorResponse),
+    ),
+)]
 async fn stats(State(state): State<Arc<AppState>>) -> AppResult<Json<serde_json::Value>> {
     let conn = state.db.conn();
 
@@ -53,6 +97,14 @@ async fn stats(State(state): State<Arc<AppState>>) -> AppResult<Json<serde_json:
     })))
 }
 
+#[utoipa::path(
+    get,
+    path = "/api/system/config",
+    tag = "system",
+    responses(
+        (status = 200, body = serde_json::Value),
+    ),
+)]
 async fn get_config(State(state): State<Arc<AppState>>) -> Json<serde_json::Value> {
     Json(serde_json::json!({
         "server": {
@@ -75,6 +127,14 @@ async fn get_config(State(state): State<Arc<AppState>>) -> Json<serde_json::Valu
     }))
 }
 
+#[utoipa::path(
+    get,
+    path = "/api/system/scan-status",
+    tag = "system",
+    responses(
+        (status = 200, body = ScanStatusResponse),
+    ),
+)]
 async fn scan_status(State(state): State<Arc<AppState>>) -> Json<serde_json::Value> {
     Json(state.scan_status.to_json())
 }
