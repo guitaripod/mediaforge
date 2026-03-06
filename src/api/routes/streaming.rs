@@ -227,20 +227,27 @@ async fn hls_cancel(
 async fn hls_status(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
-) -> AppResult<Json<serde_json::Value>> {
+) -> AppResult<Response> {
     let status = state.hls.session_status(&id);
     let (status_str, progress, error) = match status {
         Some(HlsStatus::Preparing(pct)) => ("preparing", Some(pct), None),
         Some(HlsStatus::Ready) => ("ready", None, None),
         Some(HlsStatus::Error(e)) => ("error", None, Some(e)),
-        None => ("not_found", None, None),
+        None => {
+            return Ok((
+                StatusCode::NOT_FOUND,
+                Json(serde_json::json!({ "error": "No active session" })),
+            )
+                .into_response());
+        }
     };
 
     Ok(Json(serde_json::json!({
         "status": status_str,
         "progress": progress,
         "error": error,
-    })))
+    }))
+    .into_response())
 }
 
 async fn hls_master(
