@@ -97,32 +97,32 @@ async fn stream_info(
 ) -> AppResult<Response> {
     let conn = state.db.conn();
 
-    let item: Option<StreamInfoRow> = conn
-        .query_row(
-            "SELECT id, video_codec, audio_codec, video_width, video_height, hdr_format, duration_secs, file_size, file_path
-             FROM media_items WHERE id = ?1",
-            [&id],
-            |row| {
-                Ok(StreamInfoRow {
-                    id: row.get(0)?,
-                    video_codec: row.get(1)?,
-                    audio_codec: row.get(2)?,
-                    video_width: row.get(3)?,
-                    video_height: row.get(4)?,
-                    hdr_format: row.get(5)?,
-                    duration_secs: row.get(6)?,
-                    file_size: row.get(7)?,
-                    file_path: row.get(8)?,
-                })
-            },
-        )
-        .ok();
-
-    let Some(item) = item else {
-        return Ok(
-            (StatusCode::NOT_FOUND, Json(serde_json::json!({ "error": "Not found" })))
-                .into_response(),
-        );
+    let item = match conn.query_row(
+        "SELECT id, video_codec, audio_codec, video_width, video_height, hdr_format, duration_secs, file_size, file_path
+         FROM media_items WHERE id = ?1",
+        [&id],
+        |row| {
+            Ok(StreamInfoRow {
+                id: row.get(0)?,
+                video_codec: row.get(1)?,
+                audio_codec: row.get(2)?,
+                video_width: row.get(3)?,
+                video_height: row.get(4)?,
+                hdr_format: row.get(5)?,
+                duration_secs: row.get(6)?,
+                file_size: row.get(7)?,
+                file_path: row.get(8)?,
+            })
+        },
+    ) {
+        Ok(item) => item,
+        Err(rusqlite::Error::QueryReturnedNoRows) => {
+            return Ok(
+                (StatusCode::NOT_FOUND, Json(serde_json::json!({ "error": "Not found" })))
+                    .into_response(),
+            );
+        }
+        Err(e) => return Err(e.into()),
     };
 
     let can_direct = item.video_codec.as_deref().map(FFmpeg::is_ios_native_video).unwrap_or(false)
@@ -183,43 +183,41 @@ async fn hls_prepare(
     let conn = state.db.conn();
 
     struct PrepareRow { file_path: String, video_codec: Option<String>, audio_codec: Option<String>, video_height: Option<i32>, duration_secs: Option<f64> }
-    let item: Option<PrepareRow> = conn
+    let PrepareRow { file_path, video_codec, mut audio_codec, video_height, duration_secs } = match conn
         .query_row(
             "SELECT file_path, video_codec, audio_codec, video_height, duration_secs FROM media_items WHERE id = ?1",
             [&id],
             |row| Ok(PrepareRow { file_path: row.get(0)?, video_codec: row.get(1)?, audio_codec: row.get(2)?, video_height: row.get(3)?, duration_secs: row.get(4)? }),
-        )
-        .ok();
-
-    let Some(PrepareRow { file_path, video_codec, mut audio_codec, video_height, duration_secs }) = item else {
-        return Ok(
-            (StatusCode::NOT_FOUND, Json(serde_json::json!({ "error": "Not found" })))
-                .into_response(),
-        );
+        ) {
+        Ok(row) => row,
+        Err(rusqlite::Error::QueryReturnedNoRows) => {
+            return Ok(
+                (StatusCode::NOT_FOUND, Json(serde_json::json!({ "error": "Not found" })))
+                    .into_response(),
+            );
+        }
+        Err(e) => return Err(e.into()),
     };
 
     let req = body.map(|b| b.0).unwrap_or_default();
     let audio_stream_index = if let Some(ref track_id) = req.audio_track_id {
-        let track: Option<(i32, String)> = conn
-            .query_row(
-                "SELECT stream_index, codec FROM audio_tracks WHERE id = ?1 AND media_id = ?2",
-                rusqlite::params![track_id, id],
-                |row| Ok((row.get(0)?, row.get(1)?)),
-            )
-            .ok();
-
-        match track {
-            Some((idx, codec)) => {
+        match conn.query_row(
+            "SELECT stream_index, codec FROM audio_tracks WHERE id = ?1 AND media_id = ?2",
+            rusqlite::params![track_id, id],
+            |row| Ok((row.get::<_, i32>(0)?, row.get::<_, String>(1)?)),
+        ) {
+            Ok((idx, codec)) => {
                 audio_codec = Some(codec);
                 Some(idx)
             }
-            None => {
+            Err(rusqlite::Error::QueryReturnedNoRows) => {
                 return Ok((
                     StatusCode::BAD_REQUEST,
                     Json(serde_json::json!({ "error": "Invalid audio track" })),
                 )
                     .into_response());
             }
+            Err(e) => return Err(e.into()),
         }
     } else {
         None
@@ -419,18 +417,19 @@ async fn direct_stream(
     Path(id): Path<String>,
     headers: HeaderMap,
 ) -> AppResult<Response> {
-    let item: Option<(String, i64)> = {
+    let (file_path, file_size): (String, i64) = {
         let conn = state.db.conn();
-        conn.query_row(
+        match conn.query_row(
             "SELECT file_path, file_size FROM media_items WHERE id = ?1",
             [&id],
             |row| Ok((row.get(0)?, row.get(1)?)),
-        )
-        .ok()
-    };
-
-    let Some((file_path, file_size)) = item else {
-        return Ok((StatusCode::NOT_FOUND, Json(serde_json::json!({ "error": "Not found" }))).into_response());
+        ) {
+            Ok(row) => row,
+            Err(rusqlite::Error::QueryReturnedNoRows) => {
+                return Ok((StatusCode::NOT_FOUND, Json(serde_json::json!({ "error": "Not found" }))).into_response());
+            }
+            Err(e) => return Err(e.into()),
+        }
     };
 
     let file_size = file_size as u64;
@@ -538,9 +537,9 @@ async fn serve_subtitle(
     State(state): State<Arc<AppState>>,
     Path((id, sub_id)): Path<(String, String)>,
 ) -> AppResult<Response> {
-    let sub: Option<Subtitle> = {
+    let sub = {
         let conn = state.db.conn();
-        conn.query_row(
+        match conn.query_row(
             "SELECT id, media_id, file_path, stream_index, language, codec, is_forced, is_default, is_external
              FROM subtitles WHERE id = ?1 AND media_id = ?2",
             rusqlite::params![sub_id, id],
@@ -557,12 +556,13 @@ async fn serve_subtitle(
                     is_external: row.get::<_, i32>(8)? != 0,
                 })
             },
-        )
-        .ok()
-    };
-
-    let Some(sub) = sub else {
-        return Ok((StatusCode::NOT_FOUND, Json(serde_json::json!({ "error": "Not found" }))).into_response());
+        ) {
+            Ok(sub) => sub,
+            Err(rusqlite::Error::QueryReturnedNoRows) => {
+                return Ok((StatusCode::NOT_FOUND, Json(serde_json::json!({ "error": "Not found" }))).into_response());
+            }
+            Err(e) => return Err(e.into()),
+        }
     };
 
     if sub.is_external

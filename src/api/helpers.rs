@@ -68,8 +68,7 @@ pub fn get_subtitles_for_media(
                 is_external: row.get::<_, i32>(8)? != 0,
             })
         })?
-        .filter_map(|r| r.ok())
-        .collect();
+        .collect::<Result<Vec<_>, _>>()?;
 
     Ok(subs)
 }
@@ -97,8 +96,7 @@ pub fn get_audio_tracks_for_media(
                 title: row.get(8)?,
             })
         })?
-        .filter_map(|r| r.ok())
-        .collect();
+        .collect::<Result<Vec<_>, _>>()?;
 
     Ok(tracks)
 }
@@ -107,18 +105,20 @@ pub fn get_playback_state(
     conn: &rusqlite::Connection,
     media_id: &str,
 ) -> Result<Option<PlaybackState>, rusqlite::Error> {
-    Ok(conn
-        .query_row(
-            "SELECT media_id, position_secs, is_watched, last_played_at FROM playback_state WHERE media_id = ?1",
-            [media_id],
-            |row| {
-                Ok(PlaybackState {
-                    media_id: row.get(0)?,
-                    position_secs: row.get(1)?,
-                    is_watched: row.get::<_, i32>(2)? != 0,
-                    last_played_at: row.get(3)?,
-                })
-            },
-        )
-        .ok())
+    match conn.query_row(
+        "SELECT media_id, position_secs, is_watched, last_played_at FROM playback_state WHERE media_id = ?1",
+        [media_id],
+        |row| {
+            Ok(PlaybackState {
+                media_id: row.get(0)?,
+                position_secs: row.get(1)?,
+                is_watched: row.get::<_, i32>(2)? != 0,
+                last_played_at: row.get(3)?,
+            })
+        },
+    ) {
+        Ok(state) => Ok(Some(state)),
+        Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+        Err(e) => Err(e),
+    }
 }

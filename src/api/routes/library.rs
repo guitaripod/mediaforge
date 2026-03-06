@@ -282,25 +282,26 @@ async fn get_movie(
         "SELECT {} FROM media_items WHERE id = ?1 AND media_type = 'movie'",
         MEDIA_ITEM_COLUMNS
     );
-    let item: Option<MediaItem> = conn.query_row(&query, [&id], media_item_from_row).ok();
-
-    match item {
-        Some(movie) => {
-            let subtitles = get_subtitles_for_media(&conn, &movie.id)?;
-            let playback = get_playback_state(&conn, &movie.id)?;
-            let audio_tracks = get_audio_tracks_for_media(&conn, &movie.id)?;
-
-            Ok(Json(MediaDetailResponse {
-                item: movie,
-                subtitles,
-                playback,
-                audio_tracks,
-            })
-            .into_response())
+    let item = match conn.query_row(&query, [&id], media_item_from_row) {
+        Ok(item) => item,
+        Err(rusqlite::Error::QueryReturnedNoRows) => {
+            return Ok((StatusCode::NOT_FOUND, Json(serde_json::json!({ "error": "Not found" })))
+                .into_response());
         }
-        None => Ok((StatusCode::NOT_FOUND, Json(serde_json::json!({ "error": "Not found" })))
-            .into_response()),
-    }
+        Err(e) => return Err(e.into()),
+    };
+
+    let subtitles = get_subtitles_for_media(&conn, &item.id)?;
+    let playback = get_playback_state(&conn, &item.id)?;
+    let audio_tracks = get_audio_tracks_for_media(&conn, &item.id)?;
+
+    Ok(Json(MediaDetailResponse {
+        item,
+        subtitles,
+        playback,
+        audio_tracks,
+    })
+    .into_response())
 }
 
 #[utoipa::path(
@@ -393,59 +394,54 @@ async fn get_show(
 ) -> AppResult<Response> {
     let conn = state.db.conn();
 
-    let show: Option<TvShow> = conn
-        .query_row(
-            "SELECT id, name, tmdb_id, overview, poster_path, backdrop_path, genres, rating, first_air_date, added_at
-             FROM tv_shows WHERE id = ?1",
-            [&id],
-            |row| {
-                Ok(TvShow {
-                    id: row.get(0)?,
-                    name: row.get(1)?,
-                    tmdb_id: row.get(2)?,
-                    overview: row.get(3)?,
-                    poster_path: row.get(4)?,
-                    backdrop_path: row.get(5)?,
-                    genres: row.get(6)?,
-                    rating: row.get(7)?,
-                    first_air_date: row.get(8)?,
-                    added_at: row.get(9)?,
-                })
-            },
-        )
-        .ok();
-
-    match show {
-        Some(show) => {
-            let mut stmt = conn.prepare(
-                "SELECT m.season_number, COUNT(*),
-                        COALESCE(SUM(CASE WHEN p.is_watched = 1 THEN 1 ELSE 0 END), 0)
-                 FROM media_items m
-                 LEFT JOIN playback_state p ON m.id = p.media_id
-                 WHERE m.show_name = ?1 AND m.media_type = 'episode' AND m.season_number IS NOT NULL
-                 GROUP BY m.season_number
-                 ORDER BY m.season_number"
-            )?;
-            let seasons: Vec<SeasonSummary> = stmt
-                .query_map([&show.name], |row| {
-                    Ok(SeasonSummary {
-                        season_number: row.get(0)?,
-                        episode_count: row.get(1)?,
-                        watched_count: row.get(2)?,
-                    })
-                })?
-                .filter_map(|r| r.ok())
-                .collect();
-
-            Ok(Json(ShowDetailResponse {
-                show,
-                seasons,
+    let show = match conn.query_row(
+        "SELECT id, name, tmdb_id, overview, poster_path, backdrop_path, genres, rating, first_air_date, added_at
+         FROM tv_shows WHERE id = ?1",
+        [&id],
+        |row| {
+            Ok(TvShow {
+                id: row.get(0)?,
+                name: row.get(1)?,
+                tmdb_id: row.get(2)?,
+                overview: row.get(3)?,
+                poster_path: row.get(4)?,
+                backdrop_path: row.get(5)?,
+                genres: row.get(6)?,
+                rating: row.get(7)?,
+                first_air_date: row.get(8)?,
+                added_at: row.get(9)?,
             })
-            .into_response())
+        },
+    ) {
+        Ok(show) => show,
+        Err(rusqlite::Error::QueryReturnedNoRows) => {
+            return Ok((StatusCode::NOT_FOUND, Json(serde_json::json!({ "error": "Not found" })))
+                .into_response());
         }
-        None => Ok((StatusCode::NOT_FOUND, Json(serde_json::json!({ "error": "Not found" })))
-            .into_response()),
-    }
+        Err(e) => return Err(e.into()),
+    };
+
+    let mut stmt = conn.prepare(
+        "SELECT m.season_number, COUNT(*),
+                COALESCE(SUM(CASE WHEN p.is_watched = 1 THEN 1 ELSE 0 END), 0)
+         FROM media_items m
+         LEFT JOIN playback_state p ON m.id = p.media_id
+         WHERE m.show_name = ?1 AND m.media_type = 'episode' AND m.season_number IS NOT NULL
+         GROUP BY m.season_number
+         ORDER BY m.season_number"
+    )?;
+    let seasons: Vec<SeasonSummary> = stmt
+        .query_map([&show.name], |row| {
+            Ok(SeasonSummary {
+                season_number: row.get(0)?,
+                episode_count: row.get(1)?,
+                watched_count: row.get(2)?,
+            })
+        })?
+        .filter_map(|r| r.ok())
+        .collect();
+
+    Ok(Json(ShowDetailResponse { show, seasons }).into_response())
 }
 
 #[utoipa::path(
@@ -588,25 +584,26 @@ async fn get_episode(
         "SELECT {} FROM media_items WHERE id = ?1 AND media_type = 'episode'",
         MEDIA_ITEM_COLUMNS
     );
-    let item: Option<MediaItem> = conn.query_row(&query, [&id], media_item_from_row).ok();
-
-    match item {
-        Some(episode) => {
-            let subtitles = get_subtitles_for_media(&conn, &episode.id)?;
-            let playback = get_playback_state(&conn, &episode.id)?;
-            let audio_tracks = get_audio_tracks_for_media(&conn, &episode.id)?;
-
-            Ok(Json(MediaDetailResponse {
-                item: episode,
-                subtitles,
-                playback,
-                audio_tracks,
-            })
-            .into_response())
+    let item = match conn.query_row(&query, [&id], media_item_from_row) {
+        Ok(item) => item,
+        Err(rusqlite::Error::QueryReturnedNoRows) => {
+            return Ok((StatusCode::NOT_FOUND, Json(serde_json::json!({ "error": "Not found" })))
+                .into_response());
         }
-        None => Ok((StatusCode::NOT_FOUND, Json(serde_json::json!({ "error": "Not found" })))
-            .into_response()),
-    }
+        Err(e) => return Err(e.into()),
+    };
+
+    let subtitles = get_subtitles_for_media(&conn, &item.id)?;
+    let playback = get_playback_state(&conn, &item.id)?;
+    let audio_tracks = get_audio_tracks_for_media(&conn, &item.id)?;
+
+    Ok(Json(MediaDetailResponse {
+        item,
+        subtitles,
+        playback,
+        audio_tracks,
+    })
+    .into_response())
 }
 
 #[utoipa::path(
