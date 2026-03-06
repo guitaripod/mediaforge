@@ -75,13 +75,12 @@ impl HlsManager {
             None => media_id.to_string(),
         };
 
-        if let Some(prev_key) = self.active.get(media_id)
-            && *prev_key.value() != session_key
+        let prev_key = self.active.insert(media_id.to_string(), session_key.clone());
+        if let Some(prev) = prev_key
+            && prev != session_key
         {
-            self.cancel_session(prev_key.value());
+            self.cancel_session(&prev);
         }
-
-        self.active.insert(media_id.to_string(), session_key.clone());
 
         if start_secs.is_none() {
             if let Some(session) = self.sessions.get(&session_key)
