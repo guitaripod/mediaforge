@@ -1,4 +1,4 @@
-mod error;
+pub mod error;
 mod helpers;
 mod routes;
 
@@ -8,12 +8,27 @@ use axum::Router;
 use std::sync::Arc;
 use tower_http::cors::{Any, CorsLayer};
 use tower_http::trace::TraceLayer;
+use utoipa::OpenApi;
+use utoipa_axum::router::OpenApiRouter;
+use utoipa_swagger_ui::SwaggerUi;
 
 use crate::config::Config;
 use crate::db::Database;
 use crate::ffmpeg::FFmpeg;
 use crate::hls::HlsManager;
 use crate::metadata::TmdbClient;
+
+#[derive(OpenApi)]
+#[openapi(
+    tags(
+        (name = "library", description = "Library browsing and search"),
+        (name = "playback", description = "Playback state management"),
+        (name = "streaming", description = "Stream preparation and delivery"),
+        (name = "metadata", description = "Metadata and library scanning"),
+        (name = "system", description = "System status and configuration"),
+    )
+)]
+struct ApiDoc;
 
 pub struct AppState {
     pub db: Database,
@@ -216,16 +231,20 @@ pub fn create_router(state: AppState) -> Router {
         .allow_methods(Any)
         .allow_headers(Any);
 
-    Router::new()
-        .route("/", get(api_index))
+    let (router, api) = OpenApiRouter::with_openapi(ApiDoc::openapi())
         .merge(routes::library::routes())
         .merge(routes::playback::routes())
         .merge(routes::streaming::routes())
         .merge(routes::metadata::routes())
         .merge(routes::system::routes())
+        .split_for_parts();
+
+    router
+        .route("/", get(api_index))
+        .with_state(Arc::new(state))
+        .merge(SwaggerUi::new("/swagger-ui").url("/api-docs/openapi.json", api))
         .layer(cors)
         .layer(TraceLayer::new_for_http())
-        .with_state(Arc::new(state))
 }
 
 #[cfg(test)]
