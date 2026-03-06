@@ -6,6 +6,7 @@ use axum::response::Json;
 use axum::routing::get;
 use axum::Router;
 use std::sync::Arc;
+use tower_http::compression::CompressionLayer;
 use tower_http::cors::{Any, CorsLayer};
 use tower_http::trace::TraceLayer;
 use utoipa::OpenApi;
@@ -248,6 +249,7 @@ pub fn create_router(state: AppState) -> Router {
         .with_state(Arc::new(state))
         .merge(SwaggerUi::new("/swagger-ui").url("/api-docs/openapi.json", api))
         .layer(cors)
+        .layer(CompressionLayer::new().br(true).gzip(true))
         .layer(TraceLayer::new_for_http())
 }
 

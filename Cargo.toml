@@ -10,7 +10,7 @@ license = "GPL-3.0"
 axum = { version = "0.8", features = ["macros", "multipart", "ws"] }
 tokio = { version = "1", features = ["full"] }
 tower = { version = "0.5", features = ["util"] }
-tower-http = { version = "0.6", features = ["cors", "fs", "trace"] }
+tower-http = { version = "0.6", features = ["cors", "compression-gzip", "compression-br", "fs", "trace"] }
 hyper = { version = "1", features = ["full"] }
 
 # Serialization
