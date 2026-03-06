@@ -255,11 +255,13 @@ impl HlsManager {
 
     pub fn cleanup_session(&self, media_id: &str) -> Result<()> {
         self.cancel_media(media_id);
-        if let Some((_, session)) = self.sessions.remove(media_id)
+        let session_key = self.active.remove(media_id).map(|(_, k)| k);
+        let key = session_key.as_deref().unwrap_or(media_id);
+        if let Some((_, session)) = self.sessions.remove(key)
             && session.output_dir.exists()
         {
             std::fs::remove_dir_all(&session.output_dir)?;
-            debug!("Cleaned up HLS cache for {}", media_id);
+            debug!("Cleaned up HLS cache for {}", key);
         }
         Ok(())
     }
