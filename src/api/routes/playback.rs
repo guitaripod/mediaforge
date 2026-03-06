@@ -66,17 +66,6 @@ async fn update_playback(
         ).into_response());
     }
 
-    let conn = state.db.conn();
-    if !media_exists(&conn, &id) {
-        return Ok((StatusCode::NOT_FOUND, Json(serde_json::json!({ "error": "Not found" }))).into_response());
-    }
-    conn.execute(
-        "INSERT INTO playback_state (media_id, position_secs, last_played_at)
-         VALUES (?1, ?2, datetime('now'))
-         ON CONFLICT(media_id) DO UPDATE SET position_secs = ?2, last_played_at = datetime('now')",
-        rusqlite::params![id, body.position_secs],
-    )?;
-
     let event_type = match body.event.as_deref() {
         Some("play") => "play",
         Some("pause") => "pause",
@@ -88,6 +77,17 @@ async fn update_playback(
             ).into_response());
         }
     };
+
+    let conn = state.db.conn();
+    if !media_exists(&conn, &id) {
+        return Ok((StatusCode::NOT_FOUND, Json(serde_json::json!({ "error": "Not found" }))).into_response());
+    }
+    conn.execute(
+        "INSERT INTO playback_state (media_id, position_secs, last_played_at)
+         VALUES (?1, ?2, datetime('now'))
+         ON CONFLICT(media_id) DO UPDATE SET position_secs = ?2, last_played_at = datetime('now')",
+        rusqlite::params![id, body.position_secs],
+    )?;
 
     if event_type == "position_update" {
         conn.execute(
