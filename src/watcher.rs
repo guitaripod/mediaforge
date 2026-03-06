@@ -4,6 +4,7 @@ use std::time::Duration;
 
 use notify::{EventKind, RecommendedWatcher, RecursiveMode, Watcher};
 use tokio::sync::mpsc;
+use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info, warn};
 
 use crate::api::ScanStatus;
@@ -32,6 +33,7 @@ pub async fn run(
     ffmpeg: FFmpeg,
     tmdb: TmdbClient,
     scan_status: Arc<ScanStatus>,
+    shutdown: CancellationToken,
 ) {
     let (tx, mut rx) = mpsc::channel::<()>(16);
 
@@ -74,7 +76,17 @@ pub async fn run(
     info!("File watcher started for {} directories", dirs.len());
 
     loop {
-        rx.recv().await;
+        tokio::select! {
+            _ = shutdown.cancelled() => {
+                info!("File watcher shutting down");
+                break;
+            }
+            msg = rx.recv() => {
+                if msg.is_none() {
+                    break;
+                }
+            }
+        }
 
         while rx.try_recv().is_ok() {}
         tokio::time::sleep(Duration::from_secs(DEBOUNCE_SECS)).await;
@@ -113,6 +125,6 @@ pub async fn run(
         }
     }
 
-    #[allow(unreachable_code)]
     drop(watcher);
+    info!("File watcher stopped");
 }

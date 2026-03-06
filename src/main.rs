@@ -15,6 +15,7 @@ use std::time::Duration;
 use clap::{Parser, Subcommand};
 use tokio::net::TcpListener;
 use tokio::signal;
+use tokio_util::sync::CancellationToken;
 use tracing::{error, info};
 use tracing_subscriber::EnvFilter;
 
@@ -115,12 +116,15 @@ async fn run_server(config: Config) -> anyhow::Result<()> {
         scan_status: scan_status.clone(),
     };
 
+    let shutdown = CancellationToken::new();
+
     let scan_db = db.clone();
     let scan_ffmpeg = ffmpeg.clone();
     let scan_tmdb = tmdb.clone();
     let scan_dirs = config.library.media_dirs.clone();
     let scan_interval = config.library.scan_interval_secs;
     let scan_status_bg = scan_status.clone();
+    let scan_shutdown = shutdown.clone();
     tokio::spawn(async move {
         if !scan_dirs.is_empty() {
             scan_and_fetch_metadata(&scan_db, &scan_ffmpeg, &scan_tmdb, &scan_dirs, &scan_status_bg).await;
@@ -128,9 +132,16 @@ async fn run_server(config: Config) -> anyhow::Result<()> {
             let mut interval = tokio::time::interval(Duration::from_secs(scan_interval));
             interval.tick().await;
             loop {
-                interval.tick().await;
-                info!("Running periodic library scan...");
-                scan_and_fetch_metadata(&scan_db, &scan_ffmpeg, &scan_tmdb, &scan_dirs, &scan_status_bg).await;
+                tokio::select! {
+                    _ = scan_shutdown.cancelled() => {
+                        info!("Periodic scanner shutting down");
+                        break;
+                    }
+                    _ = interval.tick() => {
+                        info!("Running periodic library scan...");
+                        scan_and_fetch_metadata(&scan_db, &scan_ffmpeg, &scan_tmdb, &scan_dirs, &scan_status_bg).await;
+                    }
+                }
             }
         }
     });
@@ -139,14 +150,16 @@ async fn run_server(config: Config) -> anyhow::Result<()> {
     let cleanup_hls = hls.clone();
     let cleanup_db = db.clone();
     let cleanup_cache_dir = config.transcoding.cache_dir.clone();
-    tokio::spawn(cleanup::run(cleanup_config, cleanup_hls, cleanup_db, cleanup_cache_dir));
+    let cleanup_shutdown = shutdown.clone();
+    tokio::spawn(cleanup::run(cleanup_config, cleanup_hls, cleanup_db, cleanup_cache_dir, cleanup_shutdown));
 
     let watch_dirs = config.library.media_dirs.clone();
     let watch_db = db.clone();
     let watch_ffmpeg = ffmpeg.clone();
     let watch_tmdb = tmdb.clone();
     let watch_status = scan_status.clone();
-    tokio::spawn(watcher::run(watch_dirs, watch_db, watch_ffmpeg, watch_tmdb, watch_status));
+    let watch_shutdown = shutdown.clone();
+    tokio::spawn(watcher::run(watch_dirs, watch_db, watch_ffmpeg, watch_tmdb, watch_status, watch_shutdown));
 
     let addr = format!("{}:{}", config.server.host, config.server.port);
     let listener = TcpListener::bind(&addr).await?;
@@ -155,7 +168,10 @@ async fn run_server(config: Config) -> anyhow::Result<()> {
     let router = api::create_router(state);
 
     axum::serve(listener, router)
-        .with_graceful_shutdown(shutdown_signal())
+        .with_graceful_shutdown(async move {
+            shutdown_signal().await;
+            shutdown.cancel();
+        })
         .await?;
 
     info!("Server shut down gracefully");

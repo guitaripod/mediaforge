@@ -1,6 +1,7 @@
 use std::path::Path;
 use std::time::Duration;
 
+use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info};
 
 use crate::config::CleanupConfig;
@@ -8,13 +9,19 @@ use crate::db::Database;
 use crate::hls::HlsManager;
 use crate::scanner;
 
-pub async fn run(config: CleanupConfig, hls: HlsManager, db: Database, cache_dir: std::path::PathBuf) {
+pub async fn run(config: CleanupConfig, hls: HlsManager, db: Database, cache_dir: std::path::PathBuf, shutdown: CancellationToken) {
     let interval = Duration::from_secs(config.interval_secs);
     let mut timer = tokio::time::interval(interval);
     timer.tick().await;
 
     loop {
-        timer.tick().await;
+        tokio::select! {
+            _ = shutdown.cancelled() => {
+                info!("Cleanup task shutting down");
+                return;
+            }
+            _ = timer.tick() => {}
+        }
         debug!("Running scheduled cleanup");
 
         let mut total = 0u64;
