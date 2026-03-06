@@ -23,3 +23,35 @@ impl<E: Into<anyhow::Error>> From<E> for AppError {
         Self(err.into())
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use axum::response::IntoResponse;
+
+    #[test]
+    fn app_error_produces_500_with_json() {
+        let err = AppError(anyhow::anyhow!("something broke"));
+        let response = err.into_response();
+        assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        assert_eq!(
+            response.headers().get("content-type").unwrap(),
+            "application/json"
+        );
+    }
+
+    #[test]
+    fn app_error_from_rusqlite() {
+        let err: AppError = rusqlite::Error::QueryReturnedNoRows.into();
+        let response = err.into_response();
+        assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+    }
+
+    #[test]
+    fn app_error_from_io() {
+        let io_err = std::io::Error::new(std::io::ErrorKind::NotFound, "file gone");
+        let err: AppError = io_err.into();
+        let response = err.into_response();
+        assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+    }
+}

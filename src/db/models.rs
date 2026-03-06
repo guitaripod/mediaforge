@@ -227,3 +227,138 @@ pub struct ActivityLogEntry {
     pub title: Option<String>,
     pub media_type: Option<String>,
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn media_type_parse_movie() {
+        assert_eq!("movie".parse::<MediaType>().unwrap(), MediaType::Movie);
+    }
+
+    #[test]
+    fn media_type_parse_episode() {
+        assert_eq!("episode".parse::<MediaType>().unwrap(), MediaType::Episode);
+    }
+
+    #[test]
+    fn media_type_parse_invalid() {
+        assert!("show".parse::<MediaType>().is_err());
+        assert!("".parse::<MediaType>().is_err());
+        assert!("Movie".parse::<MediaType>().is_err());
+    }
+
+    #[test]
+    fn media_type_display() {
+        assert_eq!(MediaType::Movie.to_string(), "movie");
+        assert_eq!(MediaType::Episode.to_string(), "episode");
+    }
+
+    #[test]
+    fn genres_as_vec_serializes_csv_to_array() {
+        let item = MediaItem {
+            id: "t".into(), title: "T".into(), sort_title: "t".into(),
+            media_type: MediaType::Movie, year: None, file_path: "/x".into(),
+            file_size: 0, duration_secs: None, video_codec: None, video_width: None,
+            video_height: None, video_bitrate: None, hdr_format: None, audio_codec: None,
+            audio_channels: None, audio_bitrate: None, show_name: None, season_number: None,
+            episode_number: None, episode_title: None, tmdb_id: None, overview: None,
+            poster_path: None, backdrop_path: None,
+            genres: Some("Action, Comedy, Drama".into()),
+            rating: None, release_date: None,
+            added_at: "2024-01-01".into(), updated_at: "2024-01-01".into(),
+        };
+        let json = serde_json::to_value(&item).unwrap();
+        let genres = json["genres"].as_array().unwrap();
+        assert_eq!(genres.len(), 3);
+        assert_eq!(genres[0], "Action");
+        assert_eq!(genres[1], "Comedy");
+        assert_eq!(genres[2], "Drama");
+    }
+
+    #[test]
+    fn genres_as_vec_serializes_none_as_null() {
+        let item = MediaItem {
+            id: "t".into(), title: "T".into(), sort_title: "t".into(),
+            media_type: MediaType::Movie, year: None, file_path: "/x".into(),
+            file_size: 0, duration_secs: None, video_codec: None, video_width: None,
+            video_height: None, video_bitrate: None, hdr_format: None, audio_codec: None,
+            audio_channels: None, audio_bitrate: None, show_name: None, season_number: None,
+            episode_number: None, episode_title: None, tmdb_id: None, overview: None,
+            poster_path: None, backdrop_path: None, genres: None,
+            rating: None, release_date: None,
+            added_at: "2024-01-01".into(), updated_at: "2024-01-01".into(),
+        };
+        let json = serde_json::to_value(&item).unwrap();
+        assert!(json["genres"].is_null());
+    }
+
+    #[test]
+    fn genres_as_vec_serializes_empty_string_as_null() {
+        let item = MediaItem {
+            id: "t".into(), title: "T".into(), sort_title: "t".into(),
+            media_type: MediaType::Movie, year: None, file_path: "/x".into(),
+            file_size: 0, duration_secs: None, video_codec: None, video_width: None,
+            video_height: None, video_bitrate: None, hdr_format: None, audio_codec: None,
+            audio_channels: None, audio_bitrate: None, show_name: None, season_number: None,
+            episode_number: None, episode_title: None, tmdb_id: None, overview: None,
+            poster_path: None, backdrop_path: None, genres: Some("".into()),
+            rating: None, release_date: None,
+            added_at: "2024-01-01".into(), updated_at: "2024-01-01".into(),
+        };
+        let json = serde_json::to_value(&item).unwrap();
+        assert!(json["genres"].is_null());
+    }
+
+    #[test]
+    fn media_item_skips_internal_fields() {
+        let item = MediaItem {
+            id: "t".into(), title: "T".into(), sort_title: "internal".into(),
+            media_type: MediaType::Movie, year: None,
+            file_path: "/secret/path.mkv".into(),
+            file_size: 100, duration_secs: None, video_codec: None, video_width: None,
+            video_height: None, video_bitrate: Some(5000), hdr_format: None,
+            audio_codec: None, audio_channels: None, audio_bitrate: Some(320),
+            show_name: None, season_number: None, episode_number: None, episode_title: None,
+            tmdb_id: None, overview: None, poster_path: None, backdrop_path: None,
+            genres: None, rating: None, release_date: None,
+            added_at: "2024-01-01".into(), updated_at: "2024-01-01".into(),
+        };
+        let json = serde_json::to_value(&item).unwrap();
+        assert!(!json.as_object().unwrap().contains_key("sort_title"));
+        assert!(!json.as_object().unwrap().contains_key("file_path"));
+        assert!(!json.as_object().unwrap().contains_key("video_bitrate"));
+        assert!(!json.as_object().unwrap().contains_key("audio_bitrate"));
+    }
+
+    #[test]
+    fn playback_state_serialization() {
+        let ps = PlaybackState {
+            media_id: "m1".into(),
+            position_secs: 42.5,
+            is_watched: false,
+            last_played_at: None,
+        };
+        let json = serde_json::to_value(&ps).unwrap();
+        assert_eq!(json["media_id"], "m1");
+        assert_eq!(json["position_secs"], 42.5);
+        assert_eq!(json["is_watched"], false);
+        assert!(json["last_played_at"].is_null());
+    }
+
+    #[test]
+    fn subtitle_skips_file_path() {
+        let sub = Subtitle {
+            id: "s1".into(), media_id: "m1".into(),
+            file_path: Some("/secret/path.srt".into()),
+            stream_index: Some(2), language: Some("eng".into()),
+            codec: Some("subrip".into()), is_forced: false, is_default: true,
+            is_external: true,
+        };
+        let json = serde_json::to_value(&sub).unwrap();
+        assert!(!json.as_object().unwrap().contains_key("file_path"));
+        assert_eq!(json["language"], "eng");
+        assert_eq!(json["is_default"], true);
+    }
+}

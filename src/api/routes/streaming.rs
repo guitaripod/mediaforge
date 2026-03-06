@@ -271,7 +271,7 @@ async fn hls_variant_playlist(
     Path((id, variant)): Path<(String, String)>,
 ) -> AppResult<Response> {
     if !HLS_VARIANT_RE.is_match(&variant) {
-        return Ok(StatusCode::BAD_REQUEST.into_response());
+        return Ok((StatusCode::BAD_REQUEST, Json(serde_json::json!({ "error": "Invalid variant" }))).into_response());
     }
 
     let Some(path) = state.hls.variant_playlist_path(&id, &variant) else {
@@ -291,7 +291,7 @@ async fn hls_segment(
     Path((id, variant, segment)): Path<(String, String, String)>,
 ) -> AppResult<Response> {
     if !HLS_VARIANT_RE.is_match(&variant) || !HLS_SEGMENT_RE.is_match(&segment) {
-        return Ok(StatusCode::BAD_REQUEST.into_response());
+        return Ok((StatusCode::BAD_REQUEST, Json(serde_json::json!({ "error": "Invalid variant or segment name" }))).into_response());
     }
 
     let Some(path) = state.hls.segment_path(&id, &variant, &segment) else {
@@ -341,7 +341,10 @@ async fn direct_stream(
     if let Some(range_str) = range_header {
         let (start, end) = match parse_range(range_str, file_size) {
             Ok(r) => r,
-            Err(status) => return Ok(status.into_response()),
+            Err(_) => return Ok((
+                StatusCode::RANGE_NOT_SATISFIABLE,
+                Json(serde_json::json!({ "error": "Range not satisfiable", "file_size": file_size })),
+            ).into_response()),
         };
         let content_length = end - start + 1;
 

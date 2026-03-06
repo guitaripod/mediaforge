@@ -169,7 +169,7 @@ async fn proxy_image(
         if cache_path.exists() {
             return serve_cached_image(&cache_path, content_type).await;
         }
-        return Ok(StatusCode::NOT_FOUND.into_response());
+        return Ok((StatusCode::NOT_FOUND, Json(serde_json::json!({ "error": "Image not found" }))).into_response());
     }
 
     let result = fetch_and_cache_image(&tmdb_path, &query.size, &size_dir, &cache_path).await;
@@ -180,7 +180,7 @@ async fn proxy_image(
 
     match result {
         Ok(data) => Ok(image_response(content_type, Body::from(data))),
-        Err(_) => Ok(StatusCode::NOT_FOUND.into_response()),
+        Err(_) => Ok((StatusCode::NOT_FOUND, Json(serde_json::json!({ "error": "Image not found" }))).into_response()),
     }
 }
 
@@ -235,5 +235,42 @@ fn content_type_for_image(path: &str) -> &'static str {
         "image/svg+xml"
     } else {
         "image/jpeg"
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn content_type_jpeg_default() {
+        assert_eq!(content_type_for_image("/abc123.jpg"), "image/jpeg");
+        assert_eq!(content_type_for_image("poster.jpeg"), "image/jpeg");
+        assert_eq!(content_type_for_image("unknown_extension.webp"), "image/jpeg");
+        assert_eq!(content_type_for_image("no_extension"), "image/jpeg");
+    }
+
+    #[test]
+    fn content_type_png() {
+        assert_eq!(content_type_for_image("image.png"), "image/png");
+    }
+
+    #[test]
+    fn content_type_svg() {
+        assert_eq!(content_type_for_image("logo.svg"), "image/svg+xml");
+    }
+
+    #[test]
+    fn valid_image_sizes_contains_expected() {
+        assert!(VALID_IMAGE_SIZES.contains(&"w92"));
+        assert!(VALID_IMAGE_SIZES.contains(&"w500"));
+        assert!(VALID_IMAGE_SIZES.contains(&"original"));
+        assert!(!VALID_IMAGE_SIZES.contains(&"w1000"));
+        assert!(!VALID_IMAGE_SIZES.contains(&""));
+    }
+
+    #[test]
+    fn default_image_size_is_w500() {
+        assert_eq!(default_image_size(), "w500");
     }
 }
