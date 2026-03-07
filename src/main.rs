@@ -91,6 +91,7 @@ async fn run_server(config: Config) -> anyhow::Result<()> {
         config.transcoding.ffmpeg_path.clone(),
         config.transcoding.ffprobe_path.clone(),
     );
+    ffmpeg.validate()?;
 
     let hls = HlsManager::new(
         ffmpeg.clone(),
@@ -186,6 +187,7 @@ async fn run_scan(config: Config) -> anyhow::Result<()> {
         config.transcoding.ffmpeg_path.clone(),
         config.transcoding.ffprobe_path.clone(),
     );
+    ffmpeg.validate()?;
 
     let scanner = Scanner::new(db.clone(), ffmpeg);
     info!("Scanning media directories...");

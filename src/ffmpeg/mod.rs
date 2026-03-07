@@ -106,6 +106,37 @@ impl FFmpeg {
         }
     }
 
+    pub fn validate(&self) -> Result<()> {
+        fn check(path: &Path, name: &str) -> Result<()> {
+            let resolved = if path.is_absolute() {
+                if !path.exists() {
+                    anyhow::bail!("{} not found at {}", name, path.display());
+                }
+                path.to_path_buf()
+            } else {
+                which(path).with_context(|| format!("{} not found in PATH (looking for {:?})", name, path))?
+            };
+
+            let meta = std::fs::metadata(&resolved)
+                .with_context(|| format!("Cannot stat {}: {}", name, resolved.display()))?;
+
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                if meta.permissions().mode() & 0o111 == 0 {
+                    anyhow::bail!("{} at {} is not executable", name, resolved.display());
+                }
+            }
+            let _ = meta;
+
+            Ok(())
+        }
+
+        check(&self.ffmpeg_path, "ffmpeg")?;
+        check(&self.ffprobe_path, "ffprobe")?;
+        Ok(())
+    }
+
     /// Probe a media file and return structured info
     pub async fn probe(&self, path: &Path) -> Result<ProbeResult> {
         let output = Command::new(&self.ffprobe_path)
@@ -571,6 +602,26 @@ mod tests {
     use super::*;
 
     #[test]
+    fn validate_finds_real_ffmpeg() {
+        let ff = FFmpeg::new(PathBuf::from("ffmpeg"), PathBuf::from("ffprobe"));
+        assert!(ff.validate().is_ok());
+    }
+
+    #[test]
+    fn validate_rejects_missing_binary() {
+        let ff = FFmpeg::new(PathBuf::from("nonexistent_ffmpeg_binary_xyz"), PathBuf::from("ffprobe"));
+        let err = ff.validate().unwrap_err();
+        assert!(err.to_string().contains("not found"));
+    }
+
+    #[test]
+    fn validate_rejects_missing_absolute_path() {
+        let ff = FFmpeg::new(PathBuf::from("/nonexistent/path/ffmpeg"), PathBuf::from("ffprobe"));
+        let err = ff.validate().unwrap_err();
+        assert!(err.to_string().contains("not found"));
+    }
+
+    #[test]
     fn native_video_h264() {
         assert!(FFmpeg::is_ios_native_video("h264"));
     }
@@ -778,6 +829,13 @@ pub struct SpriteResult {
     pub rows: u32,
     pub thumb_width: u32,
     pub thumb_height: u32,
+}
+
+fn which(name: &Path) -> Option<PathBuf> {
+    let path_var = std::env::var_os("PATH")?;
+    std::env::split_paths(&path_var)
+        .map(|dir| dir.join(name))
+        .find(|p| p.is_file())
 }
 
 fn sprite_interval(duration_secs: f64) -> u32 {
