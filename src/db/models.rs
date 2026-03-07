@@ -56,6 +56,7 @@ pub struct MediaItem {
     pub overview: Option<String>,
     pub poster_path: Option<String>,
     pub backdrop_path: Option<String>,
+    pub poster_blurhash: Option<String>,
     #[serde(with = "genres_as_vec")]
     #[schema(value_type = Option<Vec<String>>)]
     pub genres: Option<String>,
@@ -122,6 +123,7 @@ pub struct TvShow {
     pub overview: Option<String>,
     pub poster_path: Option<String>,
     pub backdrop_path: Option<String>,
+    pub poster_blurhash: Option<String>,
     #[serde(with = "genres_as_vec")]
     #[schema(value_type = Option<Vec<String>>)]
     pub genres: Option<String>,
@@ -137,6 +139,7 @@ pub struct MediaSummary {
     pub media_type: String,
     pub year: Option<i32>,
     pub poster_path: Option<String>,
+    pub poster_blurhash: Option<String>,
     pub rating: Option<f64>,
     pub duration_secs: Option<f64>,
     pub video_width: Option<i32>,
@@ -149,6 +152,7 @@ pub struct TvShowSummary {
     pub id: String,
     pub name: String,
     pub poster_path: Option<String>,
+    pub poster_blurhash: Option<String>,
     pub rating: Option<f64>,
     pub first_air_date: Option<String>,
     pub season_count: i32,
@@ -261,7 +265,7 @@ mod tests {
             video_height: None, video_bitrate: None, hdr_format: None, audio_codec: None,
             audio_channels: None, audio_bitrate: None, show_name: None, season_number: None,
             episode_number: None, episode_title: None, tmdb_id: None, overview: None,
-            poster_path: None, backdrop_path: None,
+            poster_path: None, backdrop_path: None, poster_blurhash: None,
             genres: Some("Action, Comedy, Drama".into()),
             rating: None, release_date: None,
             added_at: "2024-01-01".into(), updated_at: "2024-01-01".into(),
@@ -283,7 +287,7 @@ mod tests {
             video_height: None, video_bitrate: None, hdr_format: None, audio_codec: None,
             audio_channels: None, audio_bitrate: None, show_name: None, season_number: None,
             episode_number: None, episode_title: None, tmdb_id: None, overview: None,
-            poster_path: None, backdrop_path: None, genres: None,
+            poster_path: None, backdrop_path: None, poster_blurhash: None, genres: None,
             rating: None, release_date: None,
             added_at: "2024-01-01".into(), updated_at: "2024-01-01".into(),
         };
@@ -300,7 +304,7 @@ mod tests {
             video_height: None, video_bitrate: None, hdr_format: None, audio_codec: None,
             audio_channels: None, audio_bitrate: None, show_name: None, season_number: None,
             episode_number: None, episode_title: None, tmdb_id: None, overview: None,
-            poster_path: None, backdrop_path: None, genres: Some("".into()),
+            poster_path: None, backdrop_path: None, poster_blurhash: None, genres: Some("".into()),
             rating: None, release_date: None,
             added_at: "2024-01-01".into(), updated_at: "2024-01-01".into(),
         };
@@ -318,7 +322,7 @@ mod tests {
             video_height: None, video_bitrate: Some(5000), hdr_format: None,
             audio_codec: None, audio_channels: None, audio_bitrate: Some(320),
             show_name: None, season_number: None, episode_number: None, episode_title: None,
-            tmdb_id: None, overview: None, poster_path: None, backdrop_path: None,
+            tmdb_id: None, overview: None, poster_path: None, backdrop_path: None, poster_blurhash: None,
             genres: None, rating: None, release_date: None,
             added_at: "2024-01-01".into(), updated_at: "2024-01-01".into(),
         };

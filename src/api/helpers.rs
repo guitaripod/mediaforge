@@ -5,7 +5,7 @@ pub const MEDIA_ITEM_COLUMNS: &str =
      duration_secs, video_codec, video_width, video_height, video_bitrate,
      hdr_format, audio_codec, audio_channels, audio_bitrate,
      show_name, season_number, episode_number, episode_title,
-     tmdb_id, overview, poster_path, backdrop_path, genres, rating,
+     tmdb_id, overview, poster_path, backdrop_path, poster_blurhash, genres, rating,
      release_date, added_at, updated_at";
 
 pub fn media_item_from_row(row: &rusqlite::Row) -> rusqlite::Result<MediaItem> {
@@ -37,11 +37,12 @@ pub fn media_item_from_row(row: &rusqlite::Row) -> rusqlite::Result<MediaItem> {
         overview: row.get(21)?,
         poster_path: row.get(22)?,
         backdrop_path: row.get(23)?,
-        genres: row.get(24)?,
-        rating: row.get(25)?,
-        release_date: row.get(26)?,
-        added_at: row.get(27)?,
-        updated_at: row.get(28)?,
+        poster_blurhash: row.get(24)?,
+        genres: row.get(25)?,
+        rating: row.get(26)?,
+        release_date: row.get(27)?,
+        added_at: row.get(28)?,
+        updated_at: row.get(29)?,
     })
 }
 

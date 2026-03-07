@@ -59,6 +59,7 @@ impl Database {
                 overview TEXT,
                 poster_path TEXT,
                 backdrop_path TEXT,
+                poster_blurhash TEXT,
                 genres TEXT,
                 rating REAL,
                 release_date TEXT,
@@ -112,6 +113,7 @@ impl Database {
                 overview TEXT,
                 poster_path TEXT,
                 backdrop_path TEXT,
+                poster_blurhash TEXT,
                 genres TEXT,
                 rating REAL,
                 first_air_date TEXT,
@@ -133,6 +135,14 @@ impl Database {
                 WHERE is_watched = 0 AND position_secs > 0;
             ",
         )?;
+
+        for stmt in [
+            "ALTER TABLE media_items ADD COLUMN poster_blurhash TEXT",
+            "ALTER TABLE tv_shows ADD COLUMN poster_blurhash TEXT",
+        ] {
+            let _ = conn.execute(stmt, []);
+        }
+
         Ok(())
     }
 

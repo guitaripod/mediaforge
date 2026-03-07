@@ -162,6 +162,7 @@ impl Scanner {
             overview: None,
             poster_path: None,
             backdrop_path: None,
+            poster_blurhash: None,
             genres: None,
             rating: None,
             release_date: None,
@@ -178,12 +179,12 @@ impl Scanner {
                 duration_secs, video_codec, video_width, video_height, video_bitrate,
                 hdr_format, audio_codec, audio_channels, audio_bitrate,
                 show_name, season_number, episode_number, episode_title,
-                tmdb_id, overview, poster_path, backdrop_path, genres, rating,
+                tmdb_id, overview, poster_path, backdrop_path, poster_blurhash, genres, rating,
                 release_date, added_at, updated_at
             ) VALUES (
                 ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14,
                 ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25, ?26,
-                ?27, ?28, ?29
+                ?27, ?28, ?29, ?30
             )",
             rusqlite::params![
                 item.id,
@@ -210,6 +211,7 @@ impl Scanner {
                 item.overview,
                 item.poster_path,
                 item.backdrop_path,
+                item.poster_blurhash,
                 item.genres,
                 item.rating,
                 item.release_date,

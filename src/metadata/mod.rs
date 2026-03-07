@@ -1,4 +1,5 @@
 use anyhow::Result;
+use image::GenericImageView;
 use percent_encoding::{utf8_percent_encode, NON_ALPHANUMERIC};
 use reqwest::Client;
 use serde::Deserialize;
@@ -201,17 +202,22 @@ impl TmdbClient {
             match self.search_movie(&title, year).await {
                 Ok(Some(movie)) => {
                     let genres = Self::resolve_genres(&movie.genre_ids, &genre_map);
+                    let blurhash = match &movie.poster_path {
+                        Some(p) => self.fetch_blurhash(p).await,
+                        None => None,
+                    };
 
                     let conn = db.conn();
                     conn.execute(
                         "UPDATE media_items SET tmdb_id = ?1, overview = ?2, poster_path = ?3,
-                         backdrop_path = ?4, genres = ?5, rating = ?6, release_date = ?7,
-                         updated_at = datetime('now') WHERE id = ?8",
+                         backdrop_path = ?4, poster_blurhash = ?5, genres = ?6, rating = ?7, release_date = ?8,
+                         updated_at = datetime('now') WHERE id = ?9",
                         rusqlite::params![
                             movie.id,
                             movie.overview,
                             movie.poster_path,
                             movie.backdrop_path,
+                            blurhash,
                             genres,
                             movie.vote_average,
                             movie.release_date,
@@ -256,18 +262,23 @@ impl TmdbClient {
                 Ok(Some(show)) => {
                     let genres = Self::resolve_genres(&show.genre_ids, &genre_map);
                     let tmdb_show_id = show.id;
+                    let blurhash = match &show.poster_path {
+                        Some(p) => self.fetch_blurhash(p).await,
+                        None => None,
+                    };
 
                     {
                         let conn = db.conn();
                         conn.execute(
                             "UPDATE tv_shows SET tmdb_id = ?1, overview = ?2, poster_path = ?3,
-                             backdrop_path = ?4, genres = ?5, rating = ?6, first_air_date = ?7
-                             WHERE id = ?8",
+                             backdrop_path = ?4, poster_blurhash = ?5, genres = ?6, rating = ?7, first_air_date = ?8
+                             WHERE id = ?9",
                             rusqlite::params![
                                 tmdb_show_id,
                                 show.overview,
                                 show.poster_path,
                                 show.backdrop_path,
+                                blurhash,
                                 genres,
                                 show.vote_average,
                                 show.first_air_date,
@@ -406,5 +417,18 @@ impl TmdbClient {
 
     pub fn poster_url(path: &str, size: &str) -> String {
         format!("{}/{}{}", TMDB_IMAGE_BASE, size, path)
+    }
+
+    async fn fetch_blurhash(&self, poster_path: &str) -> Option<String> {
+        let url = Self::poster_url(poster_path, "w92");
+        let resp = self.client.get(&url).send().await.ok()?;
+        if !resp.status().is_success() {
+            return None;
+        }
+        let bytes = resp.bytes().await.ok()?;
+        let img = image::load_from_memory(&bytes).ok()?;
+        let (w, h) = img.dimensions();
+        let rgba = img.to_rgba8();
+        blurhash::encode(3, 4, w, h, rgba.as_raw()).ok()
     }
 }

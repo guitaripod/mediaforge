@@ -37,7 +37,8 @@ regex = "1"
 anyhow = "1"
 percent-encoding = "2"
 dashmap = "6"
-jpeg-decoder = "0.3"
+image = { version = "0.25", default-features = false, features = ["jpeg", "png"] }
+blurhash = "0.2"
 tokio-util = { version = "0.7", features = ["io", "rt"] }
 mime_guess = "2"
 
