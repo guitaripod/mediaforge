@@ -423,4 +423,35 @@ mod tests {
             .unwrap();
         assert_eq!(count, 3);
     }
+
+    #[test]
+    fn poster_blurhash_column_exists() {
+        let (db, _dir) = test_db();
+        let conn = db.conn();
+        conn.execute(
+            "INSERT INTO media_items (id, title, sort_title, media_type, file_path, file_size, poster_blurhash)
+             VALUES ('m1', 'Movie', 'movie', 'movie', '/tmp/m.mkv', 100, 'LKO2?U%2Tw=w]~RBVZRi};RPxuwH')",
+            [],
+        ).unwrap();
+
+        let hash: Option<String> = conn
+            .query_row("SELECT poster_blurhash FROM media_items WHERE id = 'm1'", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(hash.as_deref(), Some("LKO2?U%2Tw=w]~RBVZRi};RPxuwH"));
+    }
+
+    #[test]
+    fn tv_shows_poster_blurhash_column_exists() {
+        let (db, _dir) = test_db();
+        let conn = db.conn();
+        conn.execute(
+            "INSERT INTO tv_shows (id, name, poster_blurhash) VALUES ('s1', 'Show', 'LEHV6nWB2yk8pyoJadR*.7kCMdnj')",
+            [],
+        ).unwrap();
+
+        let hash: Option<String> = conn
+            .query_row("SELECT poster_blurhash FROM tv_shows WHERE id = 's1'", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(hash.as_deref(), Some("LEHV6nWB2yk8pyoJadR*.7kCMdnj"));
+    }
 }

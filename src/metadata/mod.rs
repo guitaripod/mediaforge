@@ -426,9 +426,68 @@ impl TmdbClient {
             return None;
         }
         let bytes = resp.bytes().await.ok()?;
-        let img = image::load_from_memory(&bytes).ok()?;
-        let (w, h) = img.dimensions();
-        let rgba = img.to_rgba8();
-        blurhash::encode(3, 4, w, h, rgba.as_raw()).ok()
+        compute_blurhash(&bytes)
+    }
+}
+
+pub fn compute_blurhash(image_bytes: &[u8]) -> Option<String> {
+    let img = image::load_from_memory(image_bytes).ok()?;
+    let (w, h) = img.dimensions();
+    let rgba = img.to_rgba8();
+    blurhash::encode(3, 4, w, h, rgba.as_raw()).ok()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn make_test_jpeg() -> Vec<u8> {
+        let width = 92u32;
+        let height = 138u32;
+        let mut imgbuf = image::RgbImage::new(width, height);
+        for (x, y, pixel) in imgbuf.enumerate_pixels_mut() {
+            let r = (x as f32 / width as f32 * 255.0) as u8;
+            let g = (y as f32 / height as f32 * 200.0) as u8;
+            let b = 100u8;
+            *pixel = image::Rgb([r, g, b]);
+        }
+        let mut buf = std::io::Cursor::new(Vec::new());
+        imgbuf
+            .write_to(&mut buf, image::ImageFormat::Jpeg)
+            .unwrap();
+        buf.into_inner()
+    }
+
+    #[test]
+    fn blurhash_from_jpeg_bytes() {
+        let jpeg = make_test_jpeg();
+        let hash = compute_blurhash(&jpeg).expect("blurhash should succeed");
+        assert!(!hash.is_empty());
+        assert!(hash.len() > 6);
+    }
+
+    #[test]
+    fn blurhash_is_deterministic() {
+        let jpeg = make_test_jpeg();
+        let h1 = compute_blurhash(&jpeg).unwrap();
+        let h2 = compute_blurhash(&jpeg).unwrap();
+        assert_eq!(h1, h2);
+    }
+
+    #[test]
+    fn blurhash_invalid_data_returns_none() {
+        let garbage = b"not an image at all";
+        assert!(compute_blurhash(garbage).is_none());
+    }
+
+    #[test]
+    fn blurhash_empty_returns_none() {
+        assert!(compute_blurhash(&[]).is_none());
+    }
+
+    #[test]
+    fn poster_url_format() {
+        let url = TmdbClient::poster_url("/abc123.jpg", "w92");
+        assert_eq!(url, "https://image.tmdb.org/t/p/w92/abc123.jpg");
     }
 }
