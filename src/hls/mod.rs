@@ -217,6 +217,12 @@ impl HlsManager {
             token.cancel();
             info!("Cancelled in-progress transcode for {}", session_key);
         }
+        if let Some((_, session)) = self.sessions.remove(session_key)
+            && session.output_dir.exists()
+        {
+            std::fs::remove_dir_all(&session.output_dir).ok();
+            debug!("Removed cancelled session output for {}", session_key);
+        }
     }
 
     pub fn cancel_media(&self, media_id: &str) {
@@ -381,5 +387,44 @@ mod tests {
     fn cancel_media_noop_when_no_session() {
         let mgr = test_manager();
         mgr.cancel_media("nonexistent");
+    }
+
+    #[test]
+    fn cancel_session_removes_output_dir() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let output_dir = dir.path().join("hls").join("media1");
+        std::fs::create_dir_all(&output_dir).unwrap();
+        std::fs::write(output_dir.join("master.m3u8"), "test").unwrap();
+
+        let mgr = test_manager();
+        let token = CancellationToken::new();
+        mgr.cancels.insert("media1".into(), token.clone());
+        mgr.sessions.insert("media1".into(), HlsSession {
+            media_id: "media1".into(),
+            output_dir: output_dir.clone(),
+            needs_transcode: true,
+            status: HlsStatus::Preparing(50.0),
+        });
+        mgr.active.insert("media1".into(), "media1".into());
+
+        mgr.cancel_media("media1");
+        assert!(token.is_cancelled());
+        assert!(!output_dir.exists());
+        assert!(mgr.sessions.get("media1").is_none());
+    }
+
+    #[test]
+    fn cancel_session_without_output_dir_is_safe() {
+        let mgr = test_manager();
+        mgr.sessions.insert("media1".into(), HlsSession {
+            media_id: "media1".into(),
+            output_dir: PathBuf::from("/nonexistent/path"),
+            needs_transcode: true,
+            status: HlsStatus::Preparing(0.0),
+        });
+        mgr.active.insert("media1".into(), "media1".into());
+
+        mgr.cancel_media("media1");
+        assert!(mgr.sessions.get("media1").is_none());
     }
 }
