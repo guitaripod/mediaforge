@@ -127,6 +127,9 @@ impl Database {
             CREATE INDEX IF NOT EXISTS idx_added_at ON media_items(added_at);
             CREATE INDEX IF NOT EXISTS idx_sort_title ON media_items(sort_title);
             CREATE INDEX IF NOT EXISTS idx_genres ON media_items(genres);
+            CREATE INDEX IF NOT EXISTS idx_title ON media_items(title COLLATE NOCASE);
+            CREATE INDEX IF NOT EXISTS idx_episode_title ON media_items(episode_title COLLATE NOCASE);
+            CREATE INDEX IF NOT EXISTS idx_tv_shows_name ON tv_shows(name COLLATE NOCASE);
             CREATE INDEX IF NOT EXISTS idx_subtitles_media ON subtitles(media_id);
             CREATE INDEX IF NOT EXISTS idx_audio_tracks_media ON audio_tracks(media_id);
             CREATE INDEX IF NOT EXISTS idx_activity_media ON activity_log(media_id);
@@ -194,6 +197,9 @@ mod tests {
             .collect();
         assert!(indexes.contains(&"idx_file_path".to_string()));
         assert!(indexes.contains(&"idx_sort_title".to_string()));
+        assert!(indexes.contains(&"idx_title".to_string()));
+        assert!(indexes.contains(&"idx_episode_title".to_string()));
+        assert!(indexes.contains(&"idx_tv_shows_name".to_string()));
         assert!(indexes.contains(&"idx_playback_continue".to_string()));
         assert!(indexes.contains(&"idx_audio_tracks_media".to_string()));
         assert!(indexes.contains(&"idx_activity_media".to_string()));
