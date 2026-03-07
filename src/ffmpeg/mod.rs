@@ -273,7 +273,7 @@ impl FFmpeg {
         std::fs::create_dir_all(&variant_dir)?;
 
         let playlist_path = variant_dir.join("playlist.m3u8");
-        let segment_pattern = variant_dir.join("segment_%04d.ts");
+        let segment_pattern = variant_dir.join("segment_%04d.m4s");
 
         let mut cmd = Command::new(&self.ffmpeg_path);
         cmd.args(["-y", "-hide_banner", "-loglevel", "warning"]);
@@ -305,6 +305,8 @@ impl FFmpeg {
             "0",
             "-hls_playlist_type",
             "event",
+            "-hls_segment_type",
+            "fmp4",
             "-hls_segment_filename",
         ]);
 
@@ -416,13 +418,14 @@ impl FFmpeg {
             "-f", "hls",
             "-hls_time", &segment_duration.to_string(),
             "-hls_list_size", "0",
-            "-hls_playlist_type", "vod",
+            "-hls_playlist_type", "event",
+            "-hls_segment_type", "fmp4",
             "-hls_flags", "independent_segments",
             "-master_pl_name", "master.m3u8",
             "-hls_segment_filename",
         ]);
 
-        cmd.arg(output_dir.join("%v").join("segment_%04d.ts"));
+        cmd.arg(output_dir.join("%v").join("segment_%04d.m4s"));
         cmd.arg(output_dir.join("%v").join("playlist.m3u8"));
 
         cmd.args(["-progress", "pipe:2"]);
@@ -581,7 +584,7 @@ impl FFmpeg {
     pub fn is_ios_native_video(codec: &str) -> bool {
         matches!(
             codec.to_lowercase().as_str(),
-            "h264" | "hevc" | "h265" | "vp9" | "av1"
+            "h264" | "hevc" | "h265"
         )
     }
 
@@ -589,7 +592,7 @@ impl FFmpeg {
     pub fn needs_audio_transcode(codec: &str) -> bool {
         matches!(
             codec.to_lowercase().as_str(),
-            "dts" | "dts-hd" | "truehd" | "pcm_s16le" | "pcm_s24le" | "pcm_s32le"
+            "dts" | "dts-hd" | "truehd" | "pcm_s16le" | "pcm_s24le" | "pcm_s32le" | "opus" | "vorbis" | "flac"
         )
     }
 }
@@ -640,6 +643,8 @@ mod tests {
         assert!(!FFmpeg::is_ios_native_video("mpeg4"));
         assert!(!FFmpeg::is_ios_native_video("vc1"));
         assert!(!FFmpeg::is_ios_native_video("msmpeg4v3"));
+        assert!(!FFmpeg::is_ios_native_video("av1"));
+        assert!(!FFmpeg::is_ios_native_video("vp9"));
     }
 
     #[test]
@@ -657,11 +662,17 @@ mod tests {
     }
 
     #[test]
+    fn audio_transcode_opus_vorbis_flac() {
+        assert!(FFmpeg::needs_audio_transcode("opus"));
+        assert!(FFmpeg::needs_audio_transcode("vorbis"));
+        assert!(FFmpeg::needs_audio_transcode("flac"));
+    }
+
+    #[test]
     fn audio_no_transcode() {
         assert!(!FFmpeg::needs_audio_transcode("aac"));
         assert!(!FFmpeg::needs_audio_transcode("ac3"));
         assert!(!FFmpeg::needs_audio_transcode("eac3"));
-        assert!(!FFmpeg::needs_audio_transcode("flac"));
     }
 
     #[test]
