@@ -1,4 +1,5 @@
 use anyhow::{Context, Result};
+use image::GenericImageView;
 use serde::Deserialize;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
@@ -787,10 +788,8 @@ fn sprite_interval(duration_secs: f64) -> u32 {
 
 fn image_dimensions(path: &Path) -> Result<(u32, u32)> {
     let data = std::fs::read(path)?;
-    let mut decoder = jpeg_decoder::Decoder::new(std::io::Cursor::new(data));
-    decoder.read_info().context("Failed to read JPEG header")?;
-    let info = decoder.info().context("No JPEG info")?;
-    Ok((info.width as u32, info.height as u32))
+    let img = image::load_from_memory(&data).context("Failed to decode image")?;
+    Ok(img.dimensions())
 }
 
 fn generate_sprite_vtt(duration: f64, interval: u32, cols: u32, tw: u32, th: u32) -> String {
