@@ -20,7 +20,7 @@ use crate::ffmpeg::FFmpeg;
 use crate::hls::{HlsStatus, PrepareStreamParams};
 
 static HLS_SEGMENT_RE: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r"^segment_\d{4}\.ts$").unwrap());
+    LazyLock::new(|| Regex::new(r"^(segment_\d{4}\.(ts|m4s)|init(_\d+)?\.mp4)$").unwrap());
 
 static HLS_VARIANT_RE: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"^(720p|360p|original)$").unwrap());
@@ -354,9 +354,31 @@ async fn hls_variant_playlist(
     };
 
     let content = tokio::fs::read_to_string(&path).await?;
+
+    if content.contains("#EXT-X-ENDLIST") {
+        return Ok((
+            [(header::CONTENT_TYPE, "application/vnd.apple.mpegurl")],
+            content,
+        )
+            .into_response());
+    }
+
+    let duration_secs: Option<f64> = state.db.conn()
+        .query_row("SELECT duration_secs FROM media_items WHERE id = ?1", [&id], |row| row.get(0))
+        .ok()
+        .flatten();
+
+    let start_offset = state.hls.session_start_secs(&id).unwrap_or(0.0);
+    let effective_duration = duration_secs.map(|d| (d - start_offset).max(0.0));
+
+    let augmented = match effective_duration {
+        Some(dur) => augment_event_playlist(&content, dur),
+        None => format!("{}\n#EXT-X-ENDLIST\n", content.trim_end()),
+    };
+
     Ok((
         [(header::CONTENT_TYPE, "application/vnd.apple.mpegurl")],
-        content,
+        augmented,
     )
         .into_response())
 }
@@ -384,17 +406,46 @@ async fn hls_segment(
         return Ok((StatusCode::BAD_REQUEST, Json(serde_json::json!({ "error": "Invalid variant or segment name" }))).into_response());
     }
 
-    let Some(path) = state.hls.segment_path(&id, &variant, &segment) else {
-        return Ok((StatusCode::NOT_FOUND, Json(serde_json::json!({ "error": "Not found" }))).into_response());
+    let path = match state.hls.segment_path(&id, &variant, &segment) {
+        Some(p) => p,
+        None => {
+            if let Some(session_dir) = state.hls.session_output_dir(&id) {
+                let expected = session_dir.join(&variant).join(&segment);
+                let max_polls = if state.hls.session_needs_transcode(&id) { 240 } else { 60 };
+                let mut found = false;
+                for _ in 0..max_polls {
+                    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+                    if expected.exists() {
+                        found = true;
+                        break;
+                    }
+                    if let Some(HlsStatus::Error(_)) = state.hls.session_status(&id) {
+                        break;
+                    }
+                }
+                if !found {
+                    return Ok((StatusCode::NOT_FOUND, Json(serde_json::json!({ "error": "Segment not available" }))).into_response());
+                }
+                expected
+            } else {
+                return Ok((StatusCode::NOT_FOUND, Json(serde_json::json!({ "error": "Not found" }))).into_response());
+            }
+        }
     };
 
     let file = tokio::fs::File::open(&path).await?;
     let metadata = file.metadata().await?;
     let stream = ReaderStream::new(file);
 
+    let content_type = if segment.ends_with(".ts") {
+        "video/mp2t"
+    } else {
+        "video/mp4"
+    };
+
     Ok(Response::builder()
         .status(StatusCode::OK)
-        .header(header::CONTENT_TYPE, "video/mp2t")
+        .header(header::CONTENT_TYPE, content_type)
         .header(header::CONTENT_LENGTH, metadata.len())
         .body(Body::from_stream(stream))
         .unwrap())
@@ -738,6 +789,55 @@ fn srt_to_vtt(srt: &str) -> String {
     vtt
 }
 
+fn augment_event_playlist(playlist: &str, total_duration: f64) -> String {
+    let mut target_duration = 6.0_f64;
+    let mut accounted = 0.0_f64;
+    let mut last_segment_num = -1_i64;
+
+    for line in playlist.lines() {
+        if let Some(rest) = line.strip_prefix("#EXT-X-TARGETDURATION:") {
+            target_duration = rest.trim().parse().unwrap_or(6.0);
+        } else if let Some(rest) = line.strip_prefix("#EXTINF:") {
+            let dur: f64 = rest.trim_end_matches(',').parse().unwrap_or(0.0);
+            accounted += dur;
+        } else if let Some(rest) = line.strip_prefix("segment_") {
+            if let Some(num_str) = rest.strip_suffix(".m4s").or_else(|| rest.strip_suffix(".ts")) {
+                if let Ok(n) = num_str.parse::<i64>() {
+                    last_segment_num = n;
+                }
+            }
+        }
+    }
+
+    let remaining = total_duration - accounted;
+
+    let strip_event_type = |s: &str| -> String {
+        s.lines()
+            .filter(|line| !line.starts_with("#EXT-X-PLAYLIST-TYPE:"))
+            .collect::<Vec<_>>()
+            .join("\n")
+    };
+
+    if remaining <= 0.5 {
+        let cleaned = strip_event_type(playlist);
+        return format!("{}\n#EXT-X-ENDLIST\n", cleaned.trim_end());
+    }
+
+    let mut result = strip_event_type(playlist).trim_end().to_string();
+    let mut seg_num = last_segment_num + 1;
+    let mut left = remaining;
+
+    while left > 0.5 {
+        let seg_dur = left.min(target_duration);
+        result.push_str(&format!("\n#EXTINF:{:.6},\nsegment_{:04}.m4s", seg_dur, seg_num));
+        seg_num += 1;
+        left -= seg_dur;
+    }
+
+    result.push_str("\n#EXT-X-ENDLIST\n");
+    result
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -878,6 +978,11 @@ mod tests {
         assert!(HLS_SEGMENT_RE.is_match("segment_0000.ts"));
         assert!(HLS_SEGMENT_RE.is_match("segment_0042.ts"));
         assert!(HLS_SEGMENT_RE.is_match("segment_9999.ts"));
+        assert!(HLS_SEGMENT_RE.is_match("segment_0000.m4s"));
+        assert!(HLS_SEGMENT_RE.is_match("segment_0042.m4s"));
+        assert!(HLS_SEGMENT_RE.is_match("init.mp4"));
+        assert!(HLS_SEGMENT_RE.is_match("init_0.mp4"));
+        assert!(HLS_SEGMENT_RE.is_match("init_1.mp4"));
     }
 
     #[test]
@@ -893,7 +998,9 @@ mod tests {
         assert!(!HLS_SEGMENT_RE.is_match("segment_01.ts"));
         assert!(!HLS_SEGMENT_RE.is_match("segment_00001.ts"));
         assert!(!HLS_SEGMENT_RE.is_match("other_0000.ts"));
-        assert!(!HLS_SEGMENT_RE.is_match("segment_0000.mp4"));
+        assert!(!HLS_SEGMENT_RE.is_match("evil_init.mp4"));
+        assert!(!HLS_SEGMENT_RE.is_match("init.mp4.bak"));
+        assert!(!HLS_SEGMENT_RE.is_match("init_abc.mp4"));
     }
 
     #[test]
@@ -909,5 +1016,32 @@ mod tests {
         assert!(!HLS_VARIANT_RE.is_match("../etc"));
         assert!(!HLS_VARIANT_RE.is_match(""));
         assert!(!HLS_VARIANT_RE.is_match("720p/../../etc"));
+    }
+
+    #[test]
+    fn augment_playlist_adds_projected_segments() {
+        let playlist = "#EXTM3U\n#EXT-X-VERSION:7\n#EXT-X-TARGETDURATION:10\n#EXT-X-MEDIA-SEQUENCE:0\n#EXT-X-PLAYLIST-TYPE:EVENT\n#EXT-X-MAP:URI=\"init.mp4\"\n#EXTINF:10.000000,\nsegment_0000.m4s\n#EXTINF:10.000000,\nsegment_0001.m4s\n";
+        let result = augment_event_playlist(playlist, 50.0);
+        assert!(result.contains("#EXT-X-ENDLIST"));
+        assert!(result.contains("segment_0002.m4s"));
+        assert!(result.contains("segment_0004.m4s"));
+        assert!(!result.contains("#EXT-X-PLAYLIST-TYPE:"));
+    }
+
+    #[test]
+    fn augment_playlist_complete_adds_endlist_only() {
+        let playlist = "#EXTM3U\n#EXT-X-TARGETDURATION:6\n#EXTINF:6.000000,\nsegment_0000.m4s\n#EXTINF:4.000000,\nsegment_0001.m4s\n";
+        let result = augment_event_playlist(playlist, 10.0);
+        assert!(result.contains("#EXT-X-ENDLIST"));
+        assert!(!result.contains("segment_0002.m4s"));
+    }
+
+    #[test]
+    fn augment_playlist_preserves_original_content() {
+        let playlist = "#EXTM3U\n#EXT-X-VERSION:7\n#EXT-X-TARGETDURATION:6\n#EXT-X-MAP:URI=\"init.mp4\"\n#EXTINF:6.000000,\nsegment_0000.m4s\n";
+        let result = augment_event_playlist(playlist, 30.0);
+        assert!(result.contains("#EXT-X-MAP:URI=\"init.mp4\""));
+        assert!(result.contains("segment_0000.m4s"));
+        assert!(result.contains("segment_0004.m4s"));
     }
 }
