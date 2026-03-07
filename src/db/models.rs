@@ -145,6 +145,11 @@ pub struct MediaSummary {
     pub video_width: Option<i32>,
     pub video_height: Option<i32>,
     pub hdr_format: Option<String>,
+    pub show_name: Option<String>,
+    pub show_id: Option<String>,
+    pub season_number: Option<i32>,
+    pub episode_number: Option<i32>,
+    pub episode_title: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]

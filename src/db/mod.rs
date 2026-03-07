@@ -146,6 +146,96 @@ impl Database {
             let _ = conn.execute(stmt, []);
         }
 
+        self.merge_duplicate_shows()?;
+
+        conn.execute(
+            "UPDATE media_items SET season_number = 1 WHERE media_type = 'episode' AND season_number IS NULL",
+            [],
+        )?;
+
+        Ok(())
+    }
+
+    fn merge_duplicate_shows(&self) -> Result<()> {
+        let conn = self.pool.get()?;
+
+        let mut stmt = conn.prepare(
+            "SELECT id, name FROM tv_shows ORDER BY name"
+        )?;
+        let shows: Vec<(String, String)> = stmt
+            .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?
+            .filter_map(|r| r.ok())
+            .collect();
+
+        let mut canonical: std::collections::HashMap<String, (String, String)> = std::collections::HashMap::new();
+        let mut merges: Vec<(String, String, String, String)> = Vec::new();
+
+        for (id, name) in &shows {
+            let normalized = name
+                .trim()
+                .trim_end_matches(|c: char| c == '-' || c == '–' || c == '—')
+                .trim()
+                .to_lowercase();
+            let normalized = normalized.split_whitespace().collect::<Vec<_>>().join(" ");
+
+            if let Some((canon_id, canon_name)) = canonical.get(&normalized) {
+                merges.push((id.clone(), name.clone(), canon_id.clone(), canon_name.clone()));
+            } else {
+                canonical.insert(normalized, (id.clone(), name.clone()));
+            }
+        }
+
+        if merges.is_empty() {
+            return Ok(());
+        }
+
+        tracing::info!("Merging {} duplicate TV show entries", merges.len());
+
+        for (dup_id, dup_name, canon_id, canon_name) in &merges {
+            tracing::info!("Merging show '{}' into '{}'", dup_name, canon_name);
+
+            conn.execute(
+                "UPDATE media_items SET show_name = ?1 WHERE show_name = ?2",
+                rusqlite::params![canon_name, dup_name],
+            )?;
+
+            let canon_has_tmdb: bool = conn
+                .query_row(
+                    "SELECT tmdb_id IS NOT NULL FROM tv_shows WHERE id = ?1",
+                    [canon_id],
+                    |row| row.get(0),
+                )
+                .unwrap_or(false);
+
+            if !canon_has_tmdb {
+                let dup_tmdb: Option<i64> = conn
+                    .query_row(
+                        "SELECT tmdb_id FROM tv_shows WHERE id = ?1",
+                        [dup_id],
+                        |row| row.get(0),
+                    )
+                    .unwrap_or(None);
+
+                if dup_tmdb.is_some() {
+                    conn.execute(
+                        "UPDATE tv_shows SET
+                            tmdb_id = (SELECT tmdb_id FROM tv_shows WHERE id = ?2),
+                            overview = COALESCE((SELECT overview FROM tv_shows WHERE id = ?2), overview),
+                            poster_path = COALESCE((SELECT poster_path FROM tv_shows WHERE id = ?2), poster_path),
+                            backdrop_path = COALESCE((SELECT backdrop_path FROM tv_shows WHERE id = ?2), backdrop_path),
+                            poster_blurhash = COALESCE((SELECT poster_blurhash FROM tv_shows WHERE id = ?2), poster_blurhash),
+                            genres = COALESCE((SELECT genres FROM tv_shows WHERE id = ?2), genres),
+                            rating = COALESCE((SELECT rating FROM tv_shows WHERE id = ?2), rating),
+                            first_air_date = COALESCE((SELECT first_air_date FROM tv_shows WHERE id = ?2), first_air_date)
+                         WHERE id = ?1",
+                        rusqlite::params![canon_id, dup_id],
+                    )?;
+                }
+            }
+
+            conn.execute("DELETE FROM tv_shows WHERE id = ?1", [dup_id])?;
+        }
+
         Ok(())
     }
 

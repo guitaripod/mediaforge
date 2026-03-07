@@ -304,7 +304,7 @@ impl FFmpeg {
             "-hls_list_size",
             "0",
             "-hls_playlist_type",
-            "vod",
+            "event",
             "-hls_segment_filename",
         ]);
 
@@ -350,9 +350,6 @@ impl FFmpeg {
         if !status.success() {
             anyhow::bail!("FFmpeg HLS generation failed");
         }
-
-        let master = "#EXTM3U\n#EXT-X-VERSION:3\n#EXT-X-STREAM-INF:BANDWIDTH=20000000\noriginal/playlist.m3u8\n";
-        std::fs::write(output_dir.join("master.m3u8"), master)?;
 
         Ok(())
     }

@@ -21,6 +21,14 @@ static TV_RE: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"(?i)(.+?)\s*[Ss](\d{1,2})\s*[Ee](\d{1,3})(?:\s*(.+))?").unwrap()
 });
 
+static TV_ALT_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"(?i)(.+?)\s*-?\s*(\d{1,2})x(\d{1,3})[a-z]?(?:\s*-?\s*(.+))?").unwrap()
+});
+
+static SEASON_DIR_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"(?i)(?:Season|Series)\s*(\d{1,2})").unwrap()
+});
+
 static YEAR_RE: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"[\(\[]?(\d{4})[\)\]]?").unwrap()
 });
@@ -48,6 +56,8 @@ impl Scanner {
     }
 
     pub async fn scan_directories(&self, dirs: &[PathBuf]) -> Result<u32> {
+        self.reclassify_media()?;
+
         let mut total_new = 0u32;
         for dir in dirs {
             if !dir.exists() {
@@ -59,6 +69,114 @@ impl Scanner {
         }
         prune_stale_entries(&self.db)?;
         Ok(total_new)
+    }
+
+    fn reclassify_media(&self) -> Result<()> {
+        let conn = self.db.conn();
+        let mut stmt = conn.prepare("SELECT id, file_path, media_type, show_name FROM media_items")?;
+        let items: Vec<(String, String, String, Option<String>)> = stmt
+            .query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)))?
+            .filter_map(|r| r.ok())
+            .collect();
+
+        let mut reclassified = 0u32;
+        let mut name_fixed = 0u32;
+
+        for (id, file_path, current_type, current_show_name) in &items {
+            let path = Path::new(file_path);
+            let parsed = parse_filename(path);
+
+            let new_type = parsed.media_type.to_string();
+            let needs_type_change = &new_type != current_type;
+            let needs_name_change = parsed.media_type == MediaType::Episode
+                && parsed.show_name.as_ref() != current_show_name.as_ref();
+
+            if !needs_type_change && !needs_name_change {
+                continue;
+            }
+
+            if needs_type_change {
+                conn.execute(
+                    "UPDATE media_items SET media_type = ?1, show_name = ?2, season_number = ?3,
+                     episode_number = ?4, episode_title = ?5, title = ?6, sort_title = ?7
+                     WHERE id = ?8",
+                    rusqlite::params![
+                        new_type,
+                        parsed.show_name,
+                        parsed.season_number,
+                        parsed.episode_number,
+                        parsed.episode_title,
+                        parsed.title,
+                        make_sort_title(&parsed.title),
+                        id,
+                    ],
+                )?;
+                reclassified += 1;
+
+                if parsed.media_type == MediaType::Episode {
+                    if let Some(ref show_name) = parsed.show_name {
+                        let existing: Option<String> = conn
+                            .query_row(
+                                "SELECT name FROM tv_shows WHERE LOWER(name) = LOWER(?1)",
+                                [show_name],
+                                |row| row.get(0),
+                            )
+                            .ok();
+                        if let Some(canonical) = existing {
+                            if &canonical != show_name {
+                                conn.execute(
+                                    "UPDATE media_items SET show_name = ?1 WHERE id = ?2",
+                                    rusqlite::params![canonical, id],
+                                )?;
+                            }
+                        } else {
+                            let show_id = Uuid::new_v4().to_string();
+                            conn.execute(
+                                "INSERT INTO tv_shows (id, name, added_at) VALUES (?1, ?2, ?3)",
+                                rusqlite::params![show_id, show_name, chrono::Utc::now().to_rfc3339()],
+                            )?;
+                        }
+                    }
+                }
+            } else if needs_name_change {
+                if let Some(ref new_name) = parsed.show_name {
+                    let existing: Option<String> = conn
+                        .query_row(
+                            "SELECT name FROM tv_shows WHERE LOWER(name) = LOWER(?1)",
+                            [new_name],
+                            |row| row.get(0),
+                        )
+                        .ok();
+                    let canonical = existing.as_ref().unwrap_or(new_name);
+                    conn.execute(
+                        "UPDATE media_items SET show_name = ?1 WHERE id = ?2",
+                        rusqlite::params![canonical, id],
+                    )?;
+                    if existing.is_none() {
+                        let show_id = Uuid::new_v4().to_string();
+                        conn.execute(
+                            "INSERT INTO tv_shows (id, name, added_at) VALUES (?1, ?2, ?3)",
+                            rusqlite::params![show_id, new_name, chrono::Utc::now().to_rfc3339()],
+                        )?;
+                    }
+                    name_fixed += 1;
+                }
+            }
+        }
+
+        if reclassified > 0 || name_fixed > 0 {
+            info!("Reclassified {} items, fixed {} show names", reclassified, name_fixed);
+        }
+
+        let orphan_shows = conn.execute(
+            "DELETE FROM tv_shows WHERE name NOT IN (SELECT DISTINCT show_name FROM media_items WHERE show_name IS NOT NULL)",
+            [],
+        )?;
+        if orphan_shows > 0 {
+            info!("Pruned {} orphan TV show entries after reclassification", orphan_shows);
+        }
+
+        Ok(())
     }
 
     async fn scan_directory(&self, dir: &Path) -> Result<u32> {
@@ -284,15 +402,21 @@ impl Scanner {
         if parsed.media_type == MediaType::Episode
             && let Some(ref show_name) = parsed.show_name
         {
-            let exists: bool = tx
+            let existing_name: Option<String> = tx
                 .query_row(
-                    "SELECT COUNT(*) FROM tv_shows WHERE name = ?1",
+                    "SELECT name FROM tv_shows WHERE LOWER(name) = LOWER(?1)",
                     [show_name],
-                    |row| row.get::<_, i64>(0),
+                    |row| row.get(0),
                 )
-                .unwrap_or(0)
-                > 0;
-            if !exists {
+                .ok();
+            if let Some(canonical_name) = existing_name {
+                if &canonical_name != show_name {
+                    tx.execute(
+                        "UPDATE media_items SET show_name = ?1 WHERE id = ?2",
+                        rusqlite::params![canonical_name, id],
+                    )?;
+                }
+            } else {
                 let show_id = Uuid::new_v4().to_string();
                 tx.execute(
                     "INSERT INTO tv_shows (id, name, added_at) VALUES (?1, ?2, ?3)",
@@ -356,13 +480,14 @@ fn parse_filename(path: &Path) -> ParsedFilename {
     let clean = filename.replace(['.', '_'], " ");
 
     if let Some(caps) = TV_RE.captures(&clean) {
-        let show_name = caps[1].trim().to_string();
+        let show_name = clean_show_name(&caps[1]);
         let season: i32 = caps[2].parse().unwrap_or(1);
         let episode: i32 = caps[3].parse().unwrap_or(1);
         let episode_title = caps.get(4).map(|m| {
             let raw = m.as_str().trim();
             clean_title_suffix(raw)
-        });
+        }).map(|t| t.trim_start_matches(|c: char| c == '-' || c == '–' || c == ' ').to_string())
+          .filter(|t| !t.is_empty());
 
         return ParsedFilename {
             title: format!("{} S{:02}E{:02}", show_name, season, episode),
@@ -373,6 +498,47 @@ fn parse_filename(path: &Path) -> ParsedFilename {
             episode_number: Some(episode),
             episode_title,
         };
+    }
+
+    if let Some(caps) = TV_ALT_RE.captures(&clean) {
+        let candidate_show = &caps[1];
+        if candidate_show.len() >= 2 && !candidate_show.chars().all(|c| c.is_ascii_digit() || c.is_whitespace()) {
+            let show_name = clean_show_name(candidate_show);
+            let season: i32 = caps[2].parse().unwrap_or(1);
+            let episode: i32 = caps[3].parse().unwrap_or(1);
+            let episode_title = caps.get(4).map(|m| {
+                let raw = m.as_str().trim();
+                clean_title_suffix(raw)
+            }).map(|t| t.trim_start_matches(|c: char| c == '-' || c == '–' || c == ' ').to_string())
+              .filter(|t| !t.is_empty());
+
+            return ParsedFilename {
+                title: format!("{} S{:02}E{:02}", show_name, season, episode),
+                year: None,
+                media_type: MediaType::Episode,
+                show_name: Some(show_name),
+                season_number: Some(season),
+                episode_number: Some(episode),
+                episode_title,
+            };
+        }
+    }
+
+    if is_tv_show_path(path) {
+        if let Some((dir_show_name, dir_season)) = infer_show_from_directory(path) {
+            let episode_title = clean_title_suffix(&clean);
+            let episode_title = if episode_title.is_empty() { None } else { Some(episode_title) };
+
+            return ParsedFilename {
+                title: format!("{} - {}", dir_show_name, episode_title.as_deref().unwrap_or("Unknown")),
+                year: None,
+                media_type: MediaType::Episode,
+                show_name: Some(dir_show_name),
+                season_number: Some(dir_season.unwrap_or(1)),
+                episode_number: None,
+                episode_title,
+            };
+        }
     }
 
     let mut last_year: Option<(usize, i32)> = None;
@@ -411,6 +577,62 @@ fn parse_filename(path: &Path) -> ParsedFilename {
 
 fn clean_title_suffix(title: &str) -> String {
     NOISE_RE.replace(title, "").trim().to_string()
+}
+
+fn clean_show_name(name: &str) -> String {
+    let mut cleaned = name.trim().to_string();
+    cleaned = cleaned.trim_end_matches(|c: char| c == '-' || c == '–' || c == '—').trim().to_string();
+    if let Some(pos) = cleaned.rfind('(') {
+        let after = &cleaned[pos..];
+        if YEAR_RE.is_match(after) {
+            cleaned = cleaned[..pos].trim().to_string();
+        }
+    }
+    cleaned = clean_title_suffix(&cleaned);
+    let parts: Vec<&str> = cleaned.split_whitespace().collect();
+    parts.join(" ")
+}
+
+#[cfg(test)]
+fn normalize_show_name_for_match(name: &str) -> String {
+    clean_show_name(name).to_lowercase()
+}
+
+fn is_tv_show_path(path: &Path) -> bool {
+    path.ancestors().any(|a| {
+        a.file_name()
+            .and_then(|n| n.to_str())
+            .is_some_and(|n| n.eq_ignore_ascii_case("TV Shows") || n.eq_ignore_ascii_case("TV"))
+    })
+}
+
+fn infer_show_from_directory(path: &Path) -> Option<(String, Option<i32>)> {
+    let mut season_number: Option<i32> = None;
+    let mut show_dir: Option<&std::ffi::OsStr> = None;
+
+    let components: Vec<_> = path.components().collect();
+    for (i, component) in components.iter().enumerate() {
+        if let std::path::Component::Normal(name) = component {
+            let name_str = name.to_str().unwrap_or("");
+            if name_str.eq_ignore_ascii_case("TV Shows") || name_str.eq_ignore_ascii_case("TV") {
+                if i + 1 < components.len() {
+                    if let std::path::Component::Normal(next) = &components[i + 1] {
+                        show_dir = Some(*next);
+                    }
+                }
+            }
+            if let Some(caps) = SEASON_DIR_RE.captures(name_str) {
+                season_number = caps[1].parse().ok();
+            }
+        }
+    }
+
+    let show_name = show_dir?.to_str()?;
+    let cleaned = clean_show_name(show_name);
+    if cleaned.is_empty() {
+        return None;
+    }
+    Some((cleaned, season_number))
 }
 
 fn make_sort_title(title: &str) -> String {
@@ -496,6 +718,74 @@ mod tests {
     fn parse_tv_three_digit_episode() {
         let p = parse_filename(Path::new("/tv/Pokemon.S01E155.mkv"));
         assert_eq!(p.episode_number, Some(155));
+    }
+
+    #[test]
+    fn parse_tv_trailing_dash_cleaned() {
+        let p = parse_filename(Path::new("/tv/South Park - S01E01 - Cartman Gets an Anal Probe.mkv"));
+        assert_eq!(p.media_type, MediaType::Episode);
+        assert_eq!(p.show_name, Some("South Park".to_string()));
+        assert_eq!(p.season_number, Some(1));
+        assert_eq!(p.episode_number, Some(1));
+        assert_eq!(p.episode_title, Some("Cartman Gets an Anal Probe".to_string()));
+    }
+
+    #[test]
+    fn parse_tv_nnxnn_format() {
+        let p = parse_filename(Path::new("/tv/Ed, Edd n Eddy - 01x01 - The Ed-Touchables.avi"));
+        assert_eq!(p.media_type, MediaType::Episode);
+        assert_eq!(p.show_name, Some("Ed, Edd n Eddy".to_string()));
+        assert_eq!(p.season_number, Some(1));
+        assert_eq!(p.episode_number, Some(1));
+    }
+
+    #[test]
+    fn parse_tv_nnxnn_with_letter_suffix() {
+        let p = parse_filename(Path::new("/tv/Johnny Bravo - 1x01a - Johnny Bravo.avi"));
+        assert_eq!(p.media_type, MediaType::Episode);
+        assert_eq!(p.show_name, Some("Johnny Bravo".to_string()));
+        assert_eq!(p.season_number, Some(1));
+        assert_eq!(p.episode_number, Some(1));
+    }
+
+    #[test]
+    fn parse_tv_from_directory_structure() {
+        let p = parse_filename(Path::new("/mnt/stuff/TV Shows/SpongeBob SquarePants/Shorts/Balloons.mkv"));
+        assert_eq!(p.media_type, MediaType::Episode);
+        assert_eq!(p.show_name, Some("SpongeBob SquarePants".to_string()));
+        assert_eq!(p.season_number, Some(1));
+    }
+
+    #[test]
+    fn parse_tv_from_directory_with_season() {
+        let p = parse_filename(Path::new("/mnt/stuff/TV Shows/The Office/Season 1/Some Episode.mkv"));
+        assert_eq!(p.media_type, MediaType::Episode);
+        assert_eq!(p.show_name, Some("The Office".to_string()));
+        assert_eq!(p.season_number, Some(1));
+    }
+
+    #[test]
+    fn parse_movie_not_in_tv_dir() {
+        let p = parse_filename(Path::new("/movies/Inception (2010).mkv"));
+        assert_eq!(p.media_type, MediaType::Movie);
+        assert_eq!(p.title, "Inception");
+        assert_eq!(p.year, Some(2010));
+    }
+
+    #[test]
+    fn clean_show_name_strips_trailing_dash() {
+        assert_eq!(clean_show_name("South Park -"), "South Park");
+        assert_eq!(clean_show_name("Dragon Ball Z -"), "Dragon Ball Z");
+    }
+
+    #[test]
+    fn clean_show_name_strips_year() {
+        assert_eq!(clean_show_name("Family Guy (1999)"), "Family Guy");
+    }
+
+    #[test]
+    fn clean_show_name_strips_noise() {
+        assert_eq!(clean_show_name("sample-silicon valley"), "sample-silicon valley");
     }
 
     #[test]
@@ -585,5 +875,31 @@ mod tests {
         assert_eq!(clean_title_suffix("Movie Name 1080p BluRay x264"), "Movie Name");
         assert_eq!(clean_title_suffix("Show Title HEVC DTS-HD"), "Show Title");
         assert_eq!(clean_title_suffix("Clean Title"), "Clean Title");
+    }
+
+    #[test]
+    fn is_tv_show_path_detects_tv_shows_dir() {
+        assert!(is_tv_show_path(Path::new("/mnt/stuff/TV Shows/Show/Season 1/ep.mkv")));
+        assert!(is_tv_show_path(Path::new("/mnt/stuff/TV/Show/ep.mkv")));
+        assert!(!is_tv_show_path(Path::new("/mnt/stuff/Movies/movie.mkv")));
+    }
+
+    #[test]
+    fn infer_show_from_directory_basic() {
+        let result = infer_show_from_directory(Path::new("/mnt/stuff/TV Shows/Breaking Bad/Season 3/ep.mkv"));
+        assert_eq!(result, Some(("Breaking Bad".to_string(), Some(3))));
+    }
+
+    #[test]
+    fn infer_show_from_directory_no_season() {
+        let result = infer_show_from_directory(Path::new("/mnt/stuff/TV Shows/Show Name/Specials/ep.mkv"));
+        assert_eq!(result, Some(("Show Name".to_string(), None)));
+    }
+
+    #[test]
+    fn normalize_show_name_case_insensitive() {
+        assert_eq!(normalize_show_name_for_match("SpongeBob SquarePants"), "spongebob squarepants");
+        assert_eq!(normalize_show_name_for_match("spongebob squarepants"), "spongebob squarepants");
+        assert_eq!(normalize_show_name_for_match("South Park -"), "south park");
     }
 }

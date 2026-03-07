@@ -388,7 +388,7 @@ async fn mark_season_watched(
     };
     let count = conn.execute(
         "INSERT INTO playback_state (media_id, is_watched, position_secs, last_played_at)
-         SELECT id, 1, 0, datetime('now') FROM media_items WHERE show_name = ?1 AND media_type = 'episode' AND season_number = ?2
+         SELECT id, 1, 0, datetime('now') FROM media_items WHERE show_name = ?1 AND media_type = 'episode' AND COALESCE(season_number, 1) = ?2
          ON CONFLICT(media_id) DO UPDATE SET is_watched = 1, position_secs = 0, last_played_at = datetime('now')",
         rusqlite::params![show_name, season],
     )?;
@@ -418,7 +418,7 @@ async fn mark_season_unwatched(
     };
     let count = conn.execute(
         "INSERT INTO playback_state (media_id, is_watched, position_secs, last_played_at)
-         SELECT id, 0, 0, datetime('now') FROM media_items WHERE show_name = ?1 AND media_type = 'episode' AND season_number = ?2
+         SELECT id, 0, 0, datetime('now') FROM media_items WHERE show_name = ?1 AND media_type = 'episode' AND COALESCE(season_number, 1) = ?2
          ON CONFLICT(media_id) DO UPDATE SET is_watched = 0, position_secs = 0, last_played_at = datetime('now')",
         rusqlite::params![show_name, season],
     )?;

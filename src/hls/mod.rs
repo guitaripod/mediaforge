@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tokio::sync::Semaphore;
 use tokio_util::sync::CancellationToken;
-use tracing::{debug, info};
+use tracing::{debug, error, info};
 
 use crate::ffmpeg::{AdaptiveHlsParams, FFmpeg, ProgressCallback, RemuxHlsParams};
 
@@ -134,24 +134,24 @@ impl HlsManager {
             media_id, audio_stream_index, start_secs, needs_video_transcode, needs_audio_transcode
         );
 
-        let _permit = self.transcode_semaphore.acquire().await?;
+        if needs_video_transcode {
+            let _permit = self.transcode_semaphore.acquire().await?;
 
-        let input_path = Path::new(file_path);
-        let sessions = self.sessions.clone();
-        let sk = session_key.clone();
-        let on_progress: ProgressCallback = Box::new(move |pct| {
-            if let Some(mut session) = sessions.get_mut(&sk)
-                && matches!(session.status, HlsStatus::Preparing(_))
-            {
-                session.status = HlsStatus::Preparing(pct);
-            }
-        });
+            let input_path = Path::new(file_path);
+            let sessions = self.sessions.clone();
+            let sk = session_key.clone();
+            let on_progress: ProgressCallback = Box::new(move |pct| {
+                if let Some(mut session) = sessions.get_mut(&sk)
+                    && matches!(session.status, HlsStatus::Preparing(_))
+                {
+                    session.status = HlsStatus::Preparing(pct);
+                }
+            });
 
-        let cancel = CancellationToken::new();
-        self.cancels.insert(session_key.clone(), cancel.clone());
+            let cancel = CancellationToken::new();
+            self.cancels.insert(session_key.clone(), cancel.clone());
 
-        let result = if needs_video_transcode {
-            self.ffmpeg
+            let result = self.ffmpeg
                 .generate_hls_adaptive(AdaptiveHlsParams {
                     input_path: input_path.to_path_buf(),
                     output_dir: output_dir.clone(),
@@ -163,52 +163,121 @@ impl HlsManager {
                     on_progress,
                     cancel: cancel.clone(),
                 })
-                .await
-        } else {
-            self.ffmpeg
-                .generate_hls(RemuxHlsParams {
-                    input_path: input_path.to_path_buf(),
-                    output_dir: output_dir.clone(),
-                    segment_duration: self.segment_duration,
-                    start_secs,
-                    transcode_audio: needs_audio_transcode,
-                    audio_stream_index,
-                    cancel: cancel.clone(),
-                })
-                .await
-        };
+                .await;
 
-        self.cancels.remove(&session_key);
+            self.cancels.remove(&session_key);
 
-        match result {
-            Ok(()) => {
-                let session = HlsSession {
-                    media_id: media_id.to_string(),
-                    output_dir,
-                    needs_transcode,
-                    status: HlsStatus::Ready,
-                };
-                self.sessions
-                    .insert(session_key, session.clone());
-                info!("HLS stream ready for {}", media_id);
-                Ok(session)
-            }
-            Err(e) => {
-                let err_msg = e.to_string();
-                if err_msg.contains("cancelled") {
-                    info!("HLS transcode cancelled for {}", media_id);
-                } else {
+            match result {
+                Ok(()) => {
                     let session = HlsSession {
                         media_id: media_id.to_string(),
                         output_dir,
-                        needs_transcode,
-                        status: HlsStatus::Error(err_msg.clone()),
+                        needs_transcode: true,
+                        status: HlsStatus::Ready,
                     };
-                    self.sessions
-                        .insert(session_key, session.clone());
+                    self.sessions.insert(session_key, session.clone());
+                    info!("HLS stream ready for {}", media_id);
+                    Ok(session)
                 }
-                Err(e)
+                Err(e) => {
+                    let err_msg = e.to_string();
+                    if err_msg.contains("cancelled") {
+                        info!("HLS transcode cancelled for {}", media_id);
+                    } else {
+                        let session = HlsSession {
+                            media_id: media_id.to_string(),
+                            output_dir,
+                            needs_transcode: true,
+                            status: HlsStatus::Error(err_msg.clone()),
+                        };
+                        self.sessions.insert(session_key, session.clone());
+                    }
+                    Err(e)
+                }
             }
+        } else {
+            let permit = self.transcode_semaphore.clone().acquire_owned().await?;
+
+            let cancel = CancellationToken::new();
+            self.cancels.insert(session_key.clone(), cancel.clone());
+
+            std::fs::create_dir_all(&output_dir)?;
+            let master = "#EXTM3U\n#EXT-X-VERSION:3\n#EXT-X-STREAM-INF:BANDWIDTH=20000000\noriginal/playlist.m3u8\n";
+            std::fs::write(output_dir.join("master.m3u8"), master)?;
+
+            let ffmpeg = self.ffmpeg.clone();
+            let sessions_bg = self.sessions.clone();
+            let cancels_bg = self.cancels.clone();
+            let sk_bg = session_key.clone();
+            let media_id_bg = media_id.to_string();
+            let input_owned = PathBuf::from(file_path);
+            let output_dir_bg = output_dir.clone();
+            let seg_dur = self.segment_duration;
+            let cancel_bg = cancel.clone();
+
+            tokio::spawn(async move {
+                let _permit = permit;
+                let result = ffmpeg
+                    .generate_hls(RemuxHlsParams {
+                        input_path: input_owned,
+                        output_dir: output_dir_bg,
+                        segment_duration: seg_dur,
+                        start_secs,
+                        transcode_audio: needs_audio_transcode,
+                        audio_stream_index,
+                        cancel: cancel_bg,
+                    })
+                    .await;
+
+                cancels_bg.remove(&sk_bg);
+
+                match result {
+                    Ok(()) => {
+                        info!("HLS remux completed for {}", media_id_bg);
+                    }
+                    Err(e) => {
+                        let err_msg = e.to_string();
+                        if err_msg.contains("cancelled") {
+                            info!("HLS remux cancelled for {}", media_id_bg);
+                        } else {
+                            error!("HLS remux failed for {}: {}", media_id_bg, err_msg);
+                            if let Some(mut session) = sessions_bg.get_mut(&sk_bg) {
+                                session.status = HlsStatus::Error(err_msg);
+                            }
+                        }
+                    }
+                }
+            });
+
+            let playlist_path = output_dir.join("original").join("playlist.m3u8");
+            for _ in 0..50 {
+                tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+                if cancel.is_cancelled() {
+                    anyhow::bail!("Remux cancelled");
+                }
+                if playlist_path.exists() {
+                    break;
+                }
+            }
+
+            if !playlist_path.exists() {
+                if let Some(session) = self.sessions.get(&session_key) {
+                    if let HlsStatus::Error(ref msg) = session.status {
+                        anyhow::bail!("{}", msg);
+                    }
+                }
+                anyhow::bail!("HLS remux failed to produce playlist within timeout");
+            }
+
+            let session = HlsSession {
+                media_id: media_id.to_string(),
+                output_dir,
+                needs_transcode: false,
+                status: HlsStatus::Ready,
+            };
+            self.sessions.insert(session_key, session.clone());
+            info!("HLS remux stream ready for {} (remux continuing in background)", media_id);
+            Ok(session)
         }
     }
 

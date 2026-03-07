@@ -14,6 +14,48 @@ use crate::api::helpers::{get_audio_tracks_for_media, get_playback_state, get_su
 use crate::api::AppState;
 use crate::db::models::{AudioTrack, EpisodeSummary, MediaItem, MediaSummary, PlaybackState, Subtitle, TvShow, TvShowSummary};
 
+fn media_summary_from_movie_row(row: &rusqlite::Row) -> rusqlite::Result<MediaSummary> {
+    Ok(MediaSummary {
+        id: row.get(0)?,
+        title: row.get(1)?,
+        media_type: "movie".to_string(),
+        year: row.get(2)?,
+        poster_path: row.get(3)?,
+        poster_blurhash: row.get(4)?,
+        rating: row.get(5)?,
+        duration_secs: row.get(6)?,
+        video_width: row.get(7)?,
+        video_height: row.get(8)?,
+        hdr_format: row.get(9)?,
+        show_name: None,
+        show_id: None,
+        season_number: None,
+        episode_number: None,
+        episode_title: None,
+    })
+}
+
+fn media_summary_from_full_row(row: &rusqlite::Row) -> rusqlite::Result<MediaSummary> {
+    Ok(MediaSummary {
+        id: row.get(0)?,
+        title: row.get(1)?,
+        media_type: row.get(2)?,
+        year: row.get(3)?,
+        poster_path: row.get(4)?,
+        poster_blurhash: row.get(5)?,
+        rating: row.get(6)?,
+        duration_secs: row.get(7)?,
+        video_width: row.get(8)?,
+        video_height: row.get(9)?,
+        hdr_format: row.get(10)?,
+        show_name: row.get(11)?,
+        show_id: row.get(12)?,
+        season_number: row.get(13)?,
+        episode_number: row.get(14)?,
+        episode_title: row.get(15)?,
+    })
+}
+
 pub fn routes() -> OpenApiRouter<Arc<AppState>> {
     OpenApiRouter::new()
         .routes(routes!(list_movies))
@@ -121,6 +163,7 @@ struct ContinueWatchingItem {
     progress_percent: Option<f64>,
     last_played_at: String,
     show_name: Option<String>,
+    show_id: Option<String>,
     season_number: Option<i32>,
     episode_number: Option<i32>,
     episode_title: Option<String>,
@@ -205,19 +248,7 @@ async fn list_movies(
         let mut stmt = conn.prepare(&query)?;
         let movies: Vec<MediaSummary> = stmt
             .query_map(rusqlite::params![genre_pattern, per_page, offset], |row| {
-                Ok(MediaSummary {
-                    id: row.get(0)?,
-                    title: row.get(1)?,
-                    media_type: "movie".to_string(),
-                    year: row.get(2)?,
-                    poster_path: row.get(3)?,
-                    poster_blurhash: row.get(4)?,
-                    rating: row.get(5)?,
-                    duration_secs: row.get(6)?,
-                    video_width: row.get(7)?,
-                    video_height: row.get(8)?,
-                    hdr_format: row.get(9)?,
-                })
+                Ok(media_summary_from_movie_row(row)?)
             })?
             .filter_map(|r| r.ok())
             .collect();
@@ -237,19 +268,7 @@ async fn list_movies(
         let mut stmt = conn.prepare(&query)?;
         let movies: Vec<MediaSummary> = stmt
             .query_map(rusqlite::params![per_page, offset], |row| {
-                Ok(MediaSummary {
-                    id: row.get(0)?,
-                    title: row.get(1)?,
-                    media_type: "movie".to_string(),
-                    year: row.get(2)?,
-                    poster_path: row.get(3)?,
-                    poster_blurhash: row.get(4)?,
-                    rating: row.get(5)?,
-                    duration_secs: row.get(6)?,
-                    video_width: row.get(7)?,
-                    video_height: row.get(8)?,
-                    hdr_format: row.get(9)?,
-                })
+                Ok(media_summary_from_movie_row(row)?)
             })?
             .filter_map(|r| r.ok())
             .collect();
@@ -343,7 +362,7 @@ async fn list_shows(
 
     let query = format!(
         "SELECT t.id, t.name, t.poster_path, t.poster_blurhash, t.rating, t.first_air_date,
-                COUNT(DISTINCT m.season_number),
+                COUNT(DISTINCT COALESCE(m.season_number, 1)),
                 COUNT(m.id),
                 COALESCE(SUM(CASE WHEN p.is_watched = 1 THEN 1 ELSE 0 END), 0)
          FROM tv_shows t
@@ -429,13 +448,13 @@ async fn get_show(
     };
 
     let mut stmt = conn.prepare(
-        "SELECT m.season_number, COUNT(*),
+        "SELECT COALESCE(m.season_number, 1), COUNT(*),
                 COALESCE(SUM(CASE WHEN p.is_watched = 1 THEN 1 ELSE 0 END), 0)
          FROM media_items m
          LEFT JOIN playback_state p ON m.id = p.media_id
-         WHERE m.show_name = ?1 AND m.media_type = 'episode' AND m.season_number IS NOT NULL
-         GROUP BY m.season_number
-         ORDER BY m.season_number"
+         WHERE m.show_name = ?1 AND m.media_type = 'episode'
+         GROUP BY COALESCE(m.season_number, 1)
+         ORDER BY COALESCE(m.season_number, 1)"
     )?;
     let seasons: Vec<SeasonSummary> = stmt
         .query_map([&show.name], |row| {
@@ -489,7 +508,7 @@ async fn get_season_episodes(
                 COALESCE(p.is_watched, 0), COALESCE(p.position_secs, 0)
          FROM media_items m
          LEFT JOIN playback_state p ON m.id = p.media_id
-         WHERE m.show_name = ?1 AND m.media_type = 'episode' AND m.season_number = ?2
+         WHERE m.show_name = ?1 AND m.media_type = 'episode' AND COALESCE(m.season_number, 1) = ?2
          ORDER BY m.episode_number",
     )?;
 
@@ -642,7 +661,7 @@ async fn continue_watching(
         "SELECT m.id, m.title, m.media_type, COALESCE(m.poster_path, t.poster_path),
                 COALESCE(m.poster_blurhash, t.poster_blurhash), m.duration_secs,
                 p.position_secs, p.last_played_at,
-                m.show_name, m.season_number, m.episode_number, m.episode_title
+                m.show_name, t.id, m.season_number, m.episode_number, m.episode_title
          FROM playback_state p
          JOIN media_items m ON m.id = p.media_id
          LEFT JOIN tv_shows t ON m.show_name = t.name AND m.media_type = 'episode'
@@ -669,9 +688,10 @@ async fn continue_watching(
                 progress_percent,
                 last_played_at: row.get(7)?,
                 show_name: row.get(8)?,
-                season_number: row.get(9)?,
-                episode_number: row.get(10)?,
-                episode_title: row.get(11)?,
+                show_id: row.get(9)?,
+                season_number: row.get(10)?,
+                episode_number: row.get(11)?,
+                episode_title: row.get(12)?,
             })
         })?
         .filter_map(|r| r.ok())
@@ -764,7 +784,8 @@ async fn recently_watched(
     let mut stmt = conn.prepare(
         "SELECT m.id, m.title, m.media_type, m.year, COALESCE(m.poster_path, t.poster_path),
                 COALESCE(m.poster_blurhash, t.poster_blurhash),
-                m.rating, m.duration_secs, m.video_width, m.video_height, m.hdr_format
+                m.rating, m.duration_secs, m.video_width, m.video_height, m.hdr_format,
+                m.show_name, t.id, m.season_number, m.episode_number, m.episode_title
          FROM playback_state p
          JOIN media_items m ON m.id = p.media_id
          LEFT JOIN tv_shows t ON m.show_name = t.name AND m.media_type = 'episode'
@@ -774,21 +795,7 @@ async fn recently_watched(
     )?;
 
     let items: Vec<MediaSummary> = stmt
-        .query_map([limit], |row| {
-            Ok(MediaSummary {
-                id: row.get(0)?,
-                title: row.get(1)?,
-                media_type: row.get(2)?,
-                year: row.get(3)?,
-                poster_path: row.get(4)?,
-                poster_blurhash: row.get(5)?,
-                rating: row.get(6)?,
-                duration_secs: row.get(7)?,
-                video_width: row.get(8)?,
-                video_height: row.get(9)?,
-                hdr_format: row.get(10)?,
-            })
-        })?
+        .query_map([limit], |row| media_summary_from_full_row(row))?
         .filter_map(|r| r.ok())
         .collect();
 
@@ -815,28 +822,15 @@ async fn recent_items(
     let mut stmt = conn.prepare(
         "SELECT m.id, m.title, m.media_type, m.year, COALESCE(m.poster_path, t.poster_path),
                 COALESCE(m.poster_blurhash, t.poster_blurhash),
-                m.rating, m.duration_secs, m.video_width, m.video_height, m.hdr_format
+                m.rating, m.duration_secs, m.video_width, m.video_height, m.hdr_format,
+                m.show_name, t.id, m.season_number, m.episode_number, m.episode_title
          FROM media_items m
          LEFT JOIN tv_shows t ON m.show_name = t.name AND m.media_type = 'episode'
          ORDER BY m.added_at DESC LIMIT ?1",
     )?;
 
     let items: Vec<MediaSummary> = stmt
-        .query_map([limit], |row| {
-            Ok(MediaSummary {
-                id: row.get(0)?,
-                title: row.get(1)?,
-                media_type: row.get(2)?,
-                year: row.get(3)?,
-                poster_path: row.get(4)?,
-                poster_blurhash: row.get(5)?,
-                rating: row.get(6)?,
-                duration_secs: row.get(7)?,
-                video_width: row.get(8)?,
-                video_height: row.get(9)?,
-                hdr_format: row.get(10)?,
-            })
-        })?
+        .query_map([limit], |row| media_summary_from_full_row(row))?
         .filter_map(|r| r.ok())
         .collect();
 
@@ -897,20 +891,26 @@ async fn random_item(
 
     let query = match params.media_type.as_deref() {
         Some("movie") =>
-            "SELECT id, title, media_type, year, poster_path, poster_blurhash, rating, duration_secs, video_width, video_height, hdr_format
-             FROM media_items WHERE media_type = 'movie' ORDER BY RANDOM() LIMIT 1",
+            "SELECT m.id, m.title, m.media_type, m.year, m.poster_path, m.poster_blurhash, m.rating, m.duration_secs, m.video_width, m.video_height, m.hdr_format,
+                    m.show_name, NULL, m.season_number, m.episode_number, m.episode_title
+             FROM media_items m WHERE m.media_type = 'movie' ORDER BY RANDOM() LIMIT 1",
         Some("episode") =>
-            "SELECT id, title, media_type, year, poster_path, poster_blurhash, rating, duration_secs, video_width, video_height, hdr_format
-             FROM media_items WHERE media_type = 'episode' ORDER BY RANDOM() LIMIT 1",
+            "SELECT m.id, m.title, m.media_type, m.year, COALESCE(m.poster_path, t.poster_path), COALESCE(m.poster_blurhash, t.poster_blurhash), m.rating, m.duration_secs, m.video_width, m.video_height, m.hdr_format,
+                    m.show_name, t.id, m.season_number, m.episode_number, m.episode_title
+             FROM media_items m
+             LEFT JOIN tv_shows t ON m.show_name = t.name
+             WHERE m.media_type = 'episode' ORDER BY RANDOM() LIMIT 1",
         Some("unwatched") =>
-            "SELECT m.id, m.title, m.media_type, m.year, COALESCE(m.poster_path, t.poster_path), COALESCE(m.poster_blurhash, t.poster_blurhash), m.rating, m.duration_secs, m.video_width, m.video_height, m.hdr_format
+            "SELECT m.id, m.title, m.media_type, m.year, COALESCE(m.poster_path, t.poster_path), COALESCE(m.poster_blurhash, t.poster_blurhash), m.rating, m.duration_secs, m.video_width, m.video_height, m.hdr_format,
+                    m.show_name, t.id, m.season_number, m.episode_number, m.episode_title
              FROM media_items m
              LEFT JOIN tv_shows t ON m.show_name = t.name AND m.media_type = 'episode'
              LEFT JOIN playback_state p ON m.id = p.media_id
              WHERE COALESCE(p.is_watched, 0) = 0
              ORDER BY RANDOM() LIMIT 1",
         None =>
-            "SELECT m.id, m.title, m.media_type, m.year, COALESCE(m.poster_path, t.poster_path), COALESCE(m.poster_blurhash, t.poster_blurhash), m.rating, m.duration_secs, m.video_width, m.video_height, m.hdr_format
+            "SELECT m.id, m.title, m.media_type, m.year, COALESCE(m.poster_path, t.poster_path), COALESCE(m.poster_blurhash, t.poster_blurhash), m.rating, m.duration_secs, m.video_width, m.video_height, m.hdr_format,
+                    m.show_name, t.id, m.season_number, m.episode_number, m.episode_title
              FROM media_items m
              LEFT JOIN tv_shows t ON m.show_name = t.name AND m.media_type = 'episode'
              ORDER BY RANDOM() LIMIT 1",
@@ -923,21 +923,7 @@ async fn random_item(
     };
 
     let item: Option<MediaSummary> = conn
-        .query_row(query, [], |row| {
-            Ok(MediaSummary {
-                id: row.get(0)?,
-                title: row.get(1)?,
-                media_type: row.get(2)?,
-                year: row.get(3)?,
-                poster_path: row.get(4)?,
-                poster_blurhash: row.get(5)?,
-                rating: row.get(6)?,
-                duration_secs: row.get(7)?,
-                video_width: row.get(8)?,
-                video_height: row.get(9)?,
-                hdr_format: row.get(10)?,
-            })
-        })
+        .query_row(query, [], |row| media_summary_from_full_row(row))
         .ok();
 
     Ok(Json(item).into_response())
